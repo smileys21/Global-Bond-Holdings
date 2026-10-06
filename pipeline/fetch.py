@@ -140,6 +140,26 @@ def tic_history() -> pd.DataFrame:
         ["date", "country"], keep="first")
 
 
+def tic_table1() -> list[pd.DataFrame]:
+    """Every country's holdings and net purchases of US long-term securities by type, monthly since 2020."""
+    src = "US Treasury TIC long-term securities (monthly)"
+    txt = get(TIC + "slt_table1.txt")
+    lines = txt.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("country\tcountry_code"))
+    df = pd.read_csv(io.StringIO("\n".join(lines[start:])), sep="\t")
+    df = df[df["date"].astype(str).str.match(r"\d{4}-\d{2}$")]
+    df["date"] = pd.to_datetime(df["date"]) + pd.offsets.MonthEnd(0)
+    df["country"] = df["country"].str.strip().replace({"Grand Total": "Foreign (all)"})
+    out = []
+    for key, market in [("treas", "US Treasury notes & bonds"), ("agcy", "US agency bonds"),
+                        ("corp", "US corporate bonds"), ("eqty", "US stocks")]:
+        for col, measure in [(f"for_lt_{key}_pos", "holdings"), (f"for_lt_{key}_net", "net purchases")]:
+            v = pd.to_numeric(df[col], errors="coerce") / 1e3
+            out.append(pd.DataFrame({"date": df["date"], "market": market, "holder": df["country"],
+                                     "measure": measure, "amount": v, "source": src}).dropna())
+    return out
+
+
 def tic() -> list[pd.DataFrame]:
     src = "US Treasury TIC (monthly)"
     t3 = tic_table3()
@@ -153,6 +173,12 @@ def tic() -> list[pd.DataFrame]:
                          "measure": "holdings", "amount": pos["for_treas_pos"], "source": src}),
            pd.DataFrame({"date": net["date"], "market": "US Treasuries", "holder": net["country"],
                          "measure": "net purchases", "amount": net["for_treas_net"], "source": src})]
+    # Cayman split: notes & bonds (the basis-trade leg) vs bills
+    cay = t3[t3["country"] == "Cayman Islands"].set_index("date").sort_index()
+    for col, market in [("for_lt_treas_pos", "US Treasury notes & bonds (Cayman)"),
+                        ("for_st_treas_pos", "US Treasury bills (Cayman)")]:
+        out.append(rows(pd.to_numeric(cay[col], errors="coerce").dropna() / 1e3, market, "Cayman Islands",
+                        "holdings", src))
     return out
 
 
@@ -251,29 +277,27 @@ def japan_holders() -> list[pd.DataFrame]:
     return out
 
 
-BOP_COUNTRIES = {"US": "United States", "FR": "France", "GB": "United Kingdom", "DE": "Germany",
-                 "IT": "Italy", "ES": "Spain", "NL": "Netherlands", "BE": "Belgium", "AU": "Australia",
-                 "CA": "Canada", "CI": "Cayman Islands", "LX": "Luxembourg", "IE": "Ireland",
-                 "CN": "China", "CH": "Switzerland", "SE": "Sweden", "AT": "Austria", "FI": "Finland",
-                 "NO": "Norway", "DK": "Denmark", "PT": "Portugal", "KR": "South Korea", "SG": "Singapore",
-                 "NZ": "New Zealand", "MX": "Mexico", "BR": "Brazil", "IN": "India", "ID": "Indonesia"}
+JP_SOV_DEST = {"US": "United States", "CA": "Canada", "AU": "Australia", "DE": "Germany", "FR": "France",
+               "IT": "Italy", "NL": "Netherlands", "GB": "United Kingdom", "DK": "Denmark", "CH": "Switzerland",
+               "HK": "Hong Kong", "SE": "Sweden", "OT": "Other countries"}
 
 
 def japan_flows() -> list[pd.DataFrame]:
-    """Monthly: Japanese investors' net purchases of long-term foreign bonds by issuer country,
-    and foreign investors' net purchases of Japanese long-term bonds."""
+    """Monthly: Japanese investors' net purchases of long-term foreign government bonds by issuer country,
+    and foreign investors' net purchases of long-term Japanese government bonds."""
     src = "BoJ balance of payments (monthly)"
-    codes = [f"BPPI6D3N9{c}" for c in BOP_COUNTRIES] + ["BPBP6JYNFA221", "BPBP6JYNFL221"]
+    codes = [f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113"]
     d = boj("BP01", codes, "201401")
     d.index = [pd.Period(f"{i[:4]}-{i[4:]}", "M").end_time.normalize() for i in d.index]
     fx = 1 / fred("EXJPUS")  # monthly average USD per JPY
     fx.index = fx.index + pd.offsets.MonthEnd(0)
-    conv = lambda s: (s * 1e8 * fx.reindex(s.index) / 1e9).dropna()  # noqa: E731
-    out = [rows(conv(d[f"BPPI6D3N9{c}"].dropna()), "Japanese investors abroad", name, "net purchases", src)
-           for c, name in BOP_COUNTRIES.items() if f"BPPI6D3N9{c}" in d]
-    out.append(rows(conv(d["BPBP6JYNFA221"].dropna()), "Japanese investors abroad", "All countries",
+    conv = lambda s: (s * 1e8 * fx.reindex(s.index) / 1e9).dropna()  # noqa: E731  (100mn yen -> USD bn)
+    sov = d[[f"BPPI6D3NA{c}" for c in JP_SOV_DEST if f"BPPI6D3NA{c}" in d]]
+    out = [rows(conv(sov[c].dropna()), "Japanese investors abroad", JP_SOV_DEST[c[-2:]], "net purchases", src)
+           for c in sov.columns]
+    out.append(rows(conv(sov.sum(axis=1, min_count=1).dropna()), "Japanese investors abroad", "All countries",
                     "net purchases", src))
-    out.append(rows(conv(d["BPBP6JYNFL221"].dropna()), "Japanese government bonds", "Foreign",
+    out.append(rows(conv(d["BPBP6JYNFL22113"].dropna()), "Japanese government bonds", "Foreign",
                     "net purchases", src))
     return out
 
@@ -344,11 +368,53 @@ def euro_holders() -> list[pd.DataFrame]:
     return out
 
 
+# ------------------------------------------------------------------ IMF (foreign assets vs reserves)
+IIP_COUNTRIES = {"KOR": "South Korea", "JPN": "Japan", "CHN": "China", "CHE": "Switzerland", "NOR": "Norway",
+                 "IND": "India"}
+IIP_SECTORS = {"S13": "Government (incl. state pension & wealth funds)", "S12R": "Insurers, pensions & funds",
+               "S1V": "Households & companies", "S122": "Banks"}
+
+
+def imf_iip() -> list[pd.DataFrame]:
+    src = "IMF international investment position (quarterly)"
+    out = []
+    for iso, name in IIP_COUNTRIES.items():
+        txt = None
+        for attempt in range(4):  # the IMF API throws occasional 503s
+            try:
+                r = requests.get(f"https://api.imf.org/external/sdmx/2.1/data/IMF.STA,IIP/{iso}.A_P..USD.Q",
+                                 headers={**UA, "Accept": "application/vnd.sdmx.data+csv;version=1.0.0"},
+                                 timeout=180)
+                r.raise_for_status()
+                txt = r.text
+                break
+            except Exception:
+                time.sleep(10 * (attempt + 1))
+        if txt is None:
+            print(f"  IMF: skipped {name} this run", file=sys.stderr)
+            continue
+        d = pd.read_csv(io.StringIO(txt), usecols=["INDICATOR", "TIME_PERIOD", "OBS_VALUE"])
+        d["date"] = [pd.Period(p, "Q").end_time.normalize() for p in d["TIME_PERIOD"]]
+        w = d.pivot_table(index="date", columns="INDICATOR", values="OBS_VALUE") / 1e9  # USD -> bn
+        if "R" in w:
+            out.append(rows(w["R"].dropna(), "Foreign assets", f"{name}|Reserves (central bank)", "holdings", src))
+        have_sectors = all(f"P_F5_{k}_MV" in w or f"P_F3_{k}_MV" in w for k in IIP_SECTORS)
+        if have_sectors:
+            for k, label in IIP_SECTORS.items():
+                v = w.get(f"P_F5_{k}_MV", 0) + w.get(f"P_F3_{k}_MV", 0)
+                out.append(rows(pd.Series(v).dropna(), "Foreign assets", f"{name}|{label}", "holdings", src))
+        elif "P_MV" in w:
+            out.append(rows(w["P_MV"].dropna(), "Foreign assets", f"{name}|Portfolio investments (all)",
+                            "holdings", src))
+    return out
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
-    jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC": tic, "CFTC": cftc,
+    jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC (": tic, "CFTC": cftc,
             "BoJ Flow of Funds": japan_holders, "BoJ balance of payments": japan_flows,
-            "ONS": uk_holders, "ECB": euro_holders}
+            "ONS": uk_holders, "ECB": euro_holders,
+            "TIC long-term securities": tic_table1, "IMF": imf_iip}
     frames, failed = [], []
     old = pd.read_csv(OUT, parse_dates=["date"]) if OUT.exists() else None
     for name, fn in jobs.items():
