@@ -28,11 +28,11 @@ st.markdown(
 
 
 @st.cache_data(ttl=3600)
-def load() -> pd.DataFrame:
+def load(version: float) -> pd.DataFrame:  # version = file timestamp, so new data never hits a stale cache
     return pd.read_csv(DATA, parse_dates=["date"])
 
 
-df = load()
+df = load(DATA.stat().st_mtime)
 
 
 def series(market: str, holder: str, src: str, measure: str = "holdings") -> pd.Series:
