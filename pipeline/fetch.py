@@ -60,13 +60,13 @@ def fed_custody() -> list[pd.DataFrame]:
 # ------------------------------------------------------- Z.1 holders by sector
 # FRED codes, millions USD, quarterly. Grouped into 8 holder groups + Other.
 Z1_GROUPS = {
-    "Federal Reserve": ["BOGZ1FL713061103Q"],
-    "Foreign (all)": ["BOGZ1LM263061105Q"],
+    "Central bank": ["BOGZ1FL713061103Q"],
+    "Foreign": ["BOGZ1LM263061105Q"],
     "Households (incl. hedge funds)": ["BOGZ1LM153061105Q"],
     "Money market funds": ["BOGZ1FL633061105Q"],
     "Banks": ["BOGZ1FL763061100Q", "BOGZ1FL753061103Q", "BOGZ1FL473061105Q",
               "BOGZ1FL733061103Q"],
-    "Mutual funds & ETFs": ["BOGZ1FL653061105Q", "BOGZ1FL563061103Q"],
+    "Investment funds": ["BOGZ1FL653061105Q", "BOGZ1FL563061103Q"],
     "Pension funds": ["BOGZ1FL573061105Q", "BOGZ1FL223061143Q", "BOGZ1FL343061105Q"],
     "Insurers": ["BOGZ1FL543061105Q", "BOGZ1FL513061105Q"],
 }
@@ -189,9 +189,166 @@ def cftc() -> list[pd.DataFrame]:
     return out
 
 
+# ------------------------------------------------------------------ FX helpers
+def fx_usd_per(ccy: str) -> pd.Series:
+    """Daily USD per unit of local currency (FRED H.10)."""
+    if ccy == "JPY":
+        return 1 / fred("DEXJPUS")
+    if ccy == "GBP":
+        return fred("DEXUSUK")
+    if ccy == "EUR":
+        return fred("DEXUSEU")
+    raise ValueError(ccy)
+
+
+def to_usd_bn(s: pd.Series, ccy: str, local_unit: float) -> pd.Series:
+    """Convert local-currency values to USD bn at the period-end rate. local_unit = size of 1 unit in LC."""
+    fx = fx_usd_per(ccy).sort_index()
+    rate = fx.reindex(fx.index.union(s.index)).ffill().reindex(s.index)
+    return (s * local_unit * rate / 1e9).dropna()
+
+
+# ------------------------------------------------------------------ Japan (BoJ)
+BOJ = "https://www.stat-search.boj.or.jp/api/v1/getDataCode"
+
+
+def boj(db: str, codes: list[str], start: str) -> pd.DataFrame:
+    out = {}
+    for i in range(0, len(codes), 50):  # API takes up to 250 codes; stay well under
+        r = requests.get(BOJ, params={"format": "json", "lang": "en", "db": db,
+                                      "code": ",".join(codes[i:i + 50]), "startDate": start},
+                         headers=UA, timeout=120)
+        r.raise_for_status()
+        j = r.json()
+        if str(j.get("STATUS")) != "200":
+            raise RuntimeError(j.get("MESSAGE"))
+        for s in j["RESULTSET"]:
+            v = s["VALUES"]
+            out[s["SERIES_CODE"]] = pd.Series(pd.to_numeric(v["VALUES"], errors="coerce"),
+                                              index=[str(d) for d in v["SURVEY_DATES"]])
+    return pd.DataFrame(out)
+
+
+JGB_GROUPS = {  # BoJ Flow of Funds sector codes, holdings of JGBs and FILP bonds
+    "Central bank": ["110"], "Banks": ["120"], "Insurers": ["131"], "Pension funds": ["140", "424"],
+    "Investment funds": ["160"], "Households": ["430"], "Foreign": ["500"],
+}
+
+
+def japan_holders() -> list[pd.DataFrame]:
+    src = "BoJ Flow of Funds (quarterly)"
+    codes = [f"FOF_FFAS{c}A311" for g in JGB_GROUPS.values() for c in g] + ["FOF_FFAS700A311"]
+    d = boj("FF", codes, "199704")
+    # survey dates are YYYYQQ (e.g. 202602 = Q2 2026)
+    d.index = [pd.Period(f"{i[:4]}Q{int(i[4:])}", "Q").end_time.normalize() for i in d.index]
+    groups = pd.DataFrame({g: d[[f"FOF_FFAS{c}A311" for c in cs]].sum(axis=1, min_count=1)
+                           for g, cs in JGB_GROUPS.items()})
+    groups["Other"] = d["FOF_FFAS700A311"] - groups.sum(axis=1)
+    out = []
+    for g in groups.columns:
+        usd = to_usd_bn(groups[g].dropna(), "JPY", 1e8)  # units of 100 million yen
+        out.append(rows(usd, "Japanese government bonds", g, "holdings", src))
+    return out
+
+
+BOP_COUNTRIES = {"US": "United States", "FR": "France", "GB": "United Kingdom", "DE": "Germany",
+                 "IT": "Italy", "ES": "Spain", "NL": "Netherlands", "BE": "Belgium", "AU": "Australia",
+                 "CA": "Canada", "CI": "Cayman Islands", "LX": "Luxembourg", "IE": "Ireland",
+                 "CN": "China", "CH": "Switzerland", "SE": "Sweden", "AT": "Austria", "FI": "Finland",
+                 "NO": "Norway", "DK": "Denmark", "PT": "Portugal", "KR": "South Korea", "SG": "Singapore",
+                 "NZ": "New Zealand", "MX": "Mexico", "BR": "Brazil", "IN": "India", "ID": "Indonesia"}
+
+
+def japan_flows() -> list[pd.DataFrame]:
+    """Monthly: Japanese investors' net purchases of long-term foreign bonds by issuer country,
+    and foreign investors' net purchases of Japanese long-term bonds."""
+    src = "BoJ balance of payments (monthly)"
+    codes = [f"BPPI6D3N9{c}" for c in BOP_COUNTRIES] + ["BPBP6JYNFA221", "BPBP6JYNFL221"]
+    d = boj("BP01", codes, "201401")
+    d.index = [pd.Period(f"{i[:4]}-{i[4:]}", "M").end_time.normalize() for i in d.index]
+    fx = 1 / fred("EXJPUS")  # monthly average USD per JPY
+    fx.index = fx.index + pd.offsets.MonthEnd(0)
+    conv = lambda s: (s * 1e8 * fx.reindex(s.index) / 1e9).dropna()  # noqa: E731
+    out = [rows(conv(d[f"BPPI6D3N9{c}"].dropna()), "Japanese investors abroad", name, "net purchases", src)
+           for c, name in BOP_COUNTRIES.items() if f"BPPI6D3N9{c}" in d]
+    out.append(rows(conv(d["BPBP6JYNFA221"].dropna()), "Japanese investors abroad", "All countries",
+                    "net purchases", src))
+    out.append(rows(conv(d["BPBP6JYNFL221"].dropna()), "Japanese government bonds", "Foreign",
+                    "net purchases", src))
+    return out
+
+
+# ------------------------------------------------------------------ UK (ONS)
+ONS = "https://www.ons.gov.uk/generator?format=csv&uri=/economy/grossdomesticproductgdp/timeseries/{}/ukea"
+GILT_GROUPS = {  # ONS CDIDs, long-term gilts (AF.32N1) held by each sector, GBP mn
+    "Foreign": "NLDT", "Central bank & banks": "NNTV", "Insurers & pension funds": "NIZB",
+    "Other financial (incl. hedge funds)": "NLQJ", "Households": "NNNN",
+}
+GILT_TOTAL = "NYXQ"  # total issued (liability of UK sector)
+
+
+def ons(cdid: str) -> pd.Series:
+    txt = get(ONS.format(cdid.lower()))
+    recs = []
+    for line in csv.reader(io.StringIO(txt)):
+        if len(line) == 2 and re.match(r"^\d{4} Q[1-4]$", line[0]):
+            recs.append((pd.Period(line[0].replace(" ", ""), "Q").end_time.normalize(), float(line[1])))
+    return pd.Series(dict(recs)).sort_index()
+
+
+def uk_holders() -> list[pd.DataFrame]:
+    src = "ONS UK Economic Accounts (quarterly)"
+    groups = pd.DataFrame({g: ons(c) for g, c in GILT_GROUPS.items()})
+    total = ons(GILT_TOTAL)
+    groups = groups.reindex(total.index)
+    groups["Other"] = total - groups.sum(axis=1)
+    return [rows(to_usd_bn(groups[g].dropna(), "GBP", 1e6), "UK gilts", g, "holdings", src)
+            for g in groups.columns]
+
+
+# ------------------------------------------------------------------ Euro area (ECB)
+ECB = "https://data-api.ecb.europa.eu/service/data/{}/{}"
+EURO = {"FR": "French government bonds", "IT": "Italian government bonds",
+        "DE": "German government bonds", "ES": "Spanish government bonds"}
+SHS_SECTORS = ["S1", "S12", "S121", "S12P", "S12Q", "S123", "S124", "S128", "S129", "S11", "S13", "S1M"]
+
+
+def ecb(flow: str, key: str) -> pd.DataFrame:
+    r = requests.get(ECB.format(flow, key), headers={**UA, "Accept": "text/csv"}, timeout=180)
+    r.raise_for_status()
+    d = pd.read_csv(io.StringIO(r.text))
+    d["date"] = [pd.Period(p, "Q").end_time.normalize() for p in d["TIME_PERIOD"]]
+    return d
+
+
+def euro_holders() -> list[pd.DataFrame]:
+    src = "ECB securities holdings (quarterly)"
+    out = []
+    for cc, market in EURO.items():
+        shs = ecb("SHSS", f"Q.N.U2.{cc}.{'+'.join(SHS_SECTORS)}.S13.N.A.LE.F3.T._Z.XDC._T.F.V.N._T")
+        h = shs.pivot(index="date", columns="REF_SECTOR", values="OBS_VALUE")  # EUR mn, face value
+        gfs = ecb("GFS", f"Q.N.{cc}.W0.S13.S1.C.L.LE.F3.T._Z.XDC._T.F.V.N._T").set_index("date")["OBS_VALUE"]
+        g = pd.DataFrame(index=h.index)
+        g["Central bank"] = h["S121"]
+        g["Banks"] = h["S12"] - h["S121"] - h["S12P"] - h["S12Q"] - h["S123"]
+        g["Insurers"] = h["S128"]
+        g["Pension funds"] = h["S129"]
+        g["Investment funds"] = h["S124"] + h["S123"]
+        g["Other financial (incl. hedge funds)"] = h["S12P"] - h["S124"]
+        g["Households"] = h["S1M"]
+        g["Other"] = h["S11"]
+        # holders outside the euro area = total debt (consolidated, face value) minus euro-area holders
+        g["Foreign"] = gfs.reindex(g.index) - (h["S1"] - h["S13"])
+        for col in g.columns:
+            out.append(rows(to_usd_bn(g[col].dropna(), "EUR", 1e6), market, col, "holdings", src))
+    return out
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
-    jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC": tic, "CFTC": cftc}
+    jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC": tic, "CFTC": cftc,
+            "BoJ Flow of Funds": japan_holders, "BoJ balance of payments": japan_flows,
+            "ONS": uk_holders, "ECB": euro_holders}
     frames, failed = [], []
     old = pd.read_csv(OUT, parse_dates=["date"]) if OUT.exists() else None
     for name, fn in jobs.items():
