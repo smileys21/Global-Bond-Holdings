@@ -22,7 +22,6 @@ UA = {"User-Agent": "bond-holders-dashboard (github.com/smileys21)"}
 FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
 TIC = "https://ticdata.treasury.gov/resource-center/data-chart-center/tic/Documents/"
 CFTC = "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
-SNB = "https://data.snb.ch/api/cube/snbbipo/data/csv/en"
 
 
 def get(url: str, tries: int = 3) -> str:
@@ -51,17 +50,11 @@ def rows(s: pd.Series, market: str, holder: str, measure: str, source: str) -> p
 
 
 # ---------------------------------------------------------------- Fed (H.4.1)
-def fed_balance_sheet() -> list[pd.DataFrame]:
+def fed_custody() -> list[pd.DataFrame]:
     src = "Fed H.4.1 (weekly)"
-    out = [
-        rows(fred("WALCL") / 1e3, "All assets", "Federal Reserve", "holdings", src),
-        rows(fred("TREAST") / 1e3, "US Treasuries", "Federal Reserve", "holdings", src),
-        rows(fred("WSHOMCB") / 1e3, "US MBS", "Federal Reserve", "holdings", src),
-        # Treasuries the Fed holds in custody for foreign central banks
-        rows(fred("WMTSECL1") / 1e3, "US Treasuries", "Foreign central banks (Fed custody)",
-             "holdings", src),
-    ]
-    return out
+    # Treasuries the Fed holds in custody for foreign central banks
+    return [rows(fred("WMTSECL1") / 1e3, "US Treasuries", "Foreign central banks (Fed custody)",
+                 "holdings", src)]
 
 
 # ------------------------------------------------------- Z.1 holders by sector
@@ -69,7 +62,7 @@ def fed_balance_sheet() -> list[pd.DataFrame]:
 Z1_GROUPS = {
     "Federal Reserve": ["BOGZ1FL713061103Q"],
     "Foreign (all)": ["BOGZ1LM263061105Q"],
-    "Households & hedge funds": ["BOGZ1LM153061105Q"],
+    "Households (incl. hedge funds)": ["BOGZ1LM153061105Q"],
     "Money market funds": ["BOGZ1FL633061105Q"],
     "Banks": ["BOGZ1FL763061100Q", "BOGZ1FL753061103Q", "BOGZ1FL473061105Q",
               "BOGZ1FL733061103Q"],
@@ -196,31 +189,9 @@ def cftc() -> list[pd.DataFrame]:
     return out
 
 
-# ------------------------------------------------------------------ SNB
-SNB_ITEMS = {"T0": "All assets", "D": "Foreign currency investments", "GFG": "Gold",
-             "WSF": "CHF securities"}
-
-
-def snb() -> list[pd.DataFrame]:
-    src = "SNB balance sheet (monthly, converted to USD)"
-    lines = get(SNB).lstrip("﻿").splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith('"Date"'))
-    df = pd.read_csv(io.StringIO("\n".join(lines[start:])), sep=";")
-    df = df[df["D0"].isin(SNB_ITEMS)].dropna()
-    df["date"] = pd.to_datetime(df["Date"]) + pd.offsets.MonthEnd(0)
-    chf = fred("DEXSZUS").resample("ME").last()  # CHF per USD, month-end
-    out = []
-    for code, name in SNB_ITEMS.items():
-        s = df[df["D0"] == code].set_index("date")["Value"].astype(float)  # CHF mn
-        fx = chf.reindex(s.index).ffill()
-        usd = (s / fx / 1e3).dropna()
-        out.append(rows(usd, name, "Swiss National Bank", "holdings", src))
-    return out
-
-
 # ------------------------------------------------------------------ main
 def main() -> int:
-    jobs = {"Fed H.4.1": fed_balance_sheet, "Z.1": z1_holders, "TIC": tic, "CFTC": cftc, "SNB": snb}
+    jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC": tic, "CFTC": cftc}
     frames, failed = [], []
     old = pd.read_csv(OUT, parse_dates=["date"]) if OUT.exists() else None
     for name, fn in jobs.items():

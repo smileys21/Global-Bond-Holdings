@@ -1,4 +1,4 @@
-"""Who Owns Government Bonds — Streamlit dashboard (Phase 1: US Treasuries, Fed, SNB)."""
+"""Global Bond Tool — who owns, buys and sells government bonds."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Who Owns Government Bonds", layout="wide")
+st.set_page_config(page_title="Global Bond Tool", layout="wide")
 
 DATA = Path(__file__).parent / "data" / "holdings.csv"
 
@@ -21,9 +21,7 @@ FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
 st.markdown(
     """<style>
     .block-container {padding-top: 2rem; max-width: 1400px;}
-    [data-testid="stMetricValue"] {font-size: 1.6rem;}
-    [data-testid="stMetricLabel"] p {color: #52514e;}
-    .asof {color: #898781; font-size: 0.8rem; margin-top: -0.6rem;}
+    .asof {color: #898781; font-size: 0.8rem; margin-top: -0.6rem; margin-bottom: 1rem;}
     </style>""",
     unsafe_allow_html=True,
 )
@@ -43,24 +41,8 @@ def series(market: str, holder: str, src: str, measure: str = "holdings") -> pd.
     return x.set_index("date")["amount"].sort_index()
 
 
-def fmt_bn(v: float) -> str:
-    sign = "-" if v < 0 else ""
-    v = abs(v)
-    return sign + (f"${v / 1e3:,.2f}tn" if v >= 1e3 else f"${v:,.0f}bn")
-
-
-def fmt_delta(v: float) -> str:
-    sign = "+" if v >= 0 else "-"
-    return f"{sign}${abs(v):,.0f}bn"
-
-
-def asof(d: pd.Timestamp, src: str) -> None:
-    st.markdown(f"<div class='asof'>As of {d:%d %b %Y} · {src}</div>", unsafe_allow_html=True)
-
-
-def change(s: pd.Series, periods_back: pd.DateOffset) -> float:
-    past = s[: s.index[-1] - periods_back]
-    return s.iloc[-1] - past.iloc[-1] if len(past) else float("nan")
+def asof(text: str) -> None:
+    st.markdown(f"<div class='asof'>{text}</div>", unsafe_allow_html=True)
 
 
 def style(fig: go.Figure, height: int = 380, yfmt: str = "$,.0f", ysuffix: str = "bn") -> go.Figure:
@@ -76,10 +58,9 @@ def style(fig: go.Figure, height: int = 380, yfmt: str = "$,.0f", ysuffix: str =
     return fig
 
 
-def line(fig: go.Figure, s: pd.Series, name: str, color: str, fill: str | None = None) -> None:
+def line(fig: go.Figure, s: pd.Series, name: str, color: str, width: float = 2) -> None:
     fig.add_trace(go.Scatter(x=s.index, y=s.values, name=name, mode="lines",
-                             line=dict(color=color, width=2), fill=fill,
-                             hovertemplate="%{y:$,.0f}bn"))
+                             line=dict(color=color, width=width), hovertemplate="%{y:$,.0f}bn"))
 
 
 RANGES = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "20Y": 20, "Max": None}
@@ -92,80 +73,40 @@ def window(key: str, default: str = "5Y") -> pd.Timestamp | None:
     return None if yrs is None else pd.Timestamp.today() - pd.DateOffset(years=yrs)
 
 
-def cut(s: pd.Series | pd.DataFrame, start):
+def cut(s, start):
     return s if start is None else s[s.index >= start]
 
 
 # ------------------------------------------------------------------ header
-st.title("Who Owns Government Bonds")
-st.caption("Central bank balance sheets, holders of US Treasuries by type and country, and hedge fund positioning. "
-           "All figures in US dollars.")
+st.title("Global Bond Tool")
+st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
-tab_cb, tab_ust, tab_for, tab_hf, tab_src = st.tabs(
-    ["Central banks", "Who owns Treasuries", "Foreign holders", "Hedge funds", "Sources"])
+tab_own, tab_for, tab_hf, tab_src = st.tabs(["Ownership", "Foreign holders", "Hedge funds", "Sources"])
 
-# ------------------------------------------------------------------ central banks
-with tab_cb:
-    fed_tot, fed_ust, fed_mbs = (series("All assets", "Federal Reserve", "H.4.1"),
-                                 series("US Treasuries", "Federal Reserve", "H.4.1"),
-                                 series("US MBS", "Federal Reserve", "H.4.1"))
-    snb_tot, snb_fx, snb_gold, snb_chf = (series(m, "Swiss National Bank", "SNB") for m in
-                                          ["All assets", "Foreign currency investments", "Gold",
-                                           "CHF securities"])
-    start = window("cb", "10Y")
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.subheader("Federal Reserve")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total assets", fmt_bn(fed_tot.iloc[-1]), fmt_delta(change(fed_tot, pd.DateOffset(years=1))) + " 1Y")
-        c2.metric("Treasuries", fmt_bn(fed_ust.iloc[-1]), fmt_delta(change(fed_ust, pd.DateOffset(weeks=4))) + " 4W")
-        c3.metric("Mortgage bonds (MBS)", fmt_bn(fed_mbs.iloc[-1]), fmt_delta(change(fed_mbs, pd.DateOffset(weeks=4))) + " 4W")
-        asof(fed_tot.index[-1], "Fed H.4.1, weekly")
-        fig = go.Figure()
-        line(fig, cut(fed_tot, start), "Total assets", SERIES[0])
-        line(fig, cut(fed_ust, start), "Treasuries", SERIES[1])
-        line(fig, cut(fed_mbs, start), "Mortgage bonds", SERIES[2])
-        st.plotly_chart(style(fig), width="stretch")
-    with right:
-        st.subheader("Swiss National Bank")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total assets", fmt_bn(snb_tot.iloc[-1]), fmt_delta(change(snb_tot, pd.DateOffset(years=1))) + " 1Y")
-        c2.metric("Foreign currency investments", fmt_bn(snb_fx.iloc[-1]),
-                  fmt_delta(change(snb_fx, pd.DateOffset(months=1))) + " 1M")
-        c3.metric("Gold", fmt_bn(snb_gold.iloc[-1]), fmt_delta(change(snb_gold, pd.DateOffset(months=1))) + " 1M")
-        asof(snb_tot.index[-1], "SNB, monthly, converted at month-end USD/CHF")
-        fig = go.Figure()
-        line(fig, cut(snb_tot, start), "Total assets", SERIES[0])
-        line(fig, cut(snb_fx, start), "Foreign currency investments", SERIES[1])
-        line(fig, cut(snb_gold, start), "Gold", SERIES[2])
-        st.plotly_chart(style(fig), width="stretch")
-        st.caption("SNB reserve mix at 30 Jun 2026 (quarterly, snb.ch): currencies USD 37%, EUR 39%, JPY 7%, "
-                   "GBP 6%, CAD 3%, other 8% · assets government bonds 61%, other bonds 11%, equities 28%. "
-                   "Dollar moves change the USD value of SNB holdings even without trading.")
-
-# ------------------------------------------------------------------ who owns treasuries
-Z1_ORDER = ["Foreign (all)", "Federal Reserve", "Money market funds", "Households & hedge funds",
+# ------------------------------------------------------------------ ownership
+Z1_ORDER = ["Foreign (all)", "Federal Reserve", "Money market funds", "Households (incl. hedge funds)",
             "Mutual funds & ETFs", "Banks", "Pension funds", "Insurers", "Other"]
-with tab_ust:
+with tab_own:
+    st.subheader("Who owns US Treasuries")
     z = df[df.source.str.contains("Z.1")].pivot(index="date", columns="holder", values="amount")[Z1_ORDER]
     total = z.sum(axis=1)
     c1, c2 = st.columns([3, 1])
     with c1:
-        start = window("ust", "20Y")
+        start = window("own", "20Y")
     with c2:
-        mode = st.segmented_control("Show", ["$ value", "% share"], default="% share", key="ustmode",
+        mode = st.segmented_control("Show", ["$ value", "% share"], default="% share", key="ownmode",
                                     label_visibility="collapsed") or "% share"
     zz = cut(z, start)
-    plot = zz.div(zz.sum(axis=1), axis=0) * 100 if mode == "% share" else zz
+    pct = mode == "% share"
+    plot = zz.div(zz.sum(axis=1), axis=0) * 100 if pct else zz
     fig = go.Figure()
     for i, h in enumerate(Z1_ORDER):
-        color = OTHER if h == "Other" else SERIES[i]
         fig.add_trace(go.Scatter(x=plot.index, y=plot[h], name=h, stackgroup="one", mode="lines",
-                                 line=dict(width=0.5, color=SURFACE), fillcolor=color,
-                                 hovertemplate=("%{y:.1f}%" if mode == "% share" else "%{y:$,.0f}bn")))
-    pct = mode == "% share"
+                                 line=dict(width=0.5, color=SURFACE),
+                                 fillcolor=OTHER if h == "Other" else SERIES[i],
+                                 hovertemplate="%{y:.1f}%" if pct else "%{y:$,.0f}bn"))
     st.plotly_chart(style(fig, 460, ".0f" if pct else "$,.0f", "%" if pct else "bn"), width="stretch")
-    asof(z.index[-1], "Fed Z.1 Financial Accounts, quarterly")
+    asof(f"As of {z.index[-1]:%d %b %Y} · Fed Financial Accounts of the US (Z.1), quarterly")
 
     last, yago = z.iloc[-1], z[: z.index[-1] - pd.DateOffset(years=1)].iloc[-1]
     tbl = pd.DataFrame({"Holding ($bn)": last.round(0), "Share": (last / total.iloc[-1] * 100).round(1),
@@ -175,27 +116,19 @@ with tab_ust:
                  column_config={"Holding ($bn)": st.column_config.NumberColumn(format="$%,d"),
                                 "Share": st.column_config.NumberColumn(format="%.1f%%"),
                                 "1Y change ($bn)": st.column_config.NumberColumn(format="%+,d")})
-    st.caption("Hedge funds have no line of their own in Z.1; they sit inside 'Households & hedge funds'. "
-               "Other = state and local governments, broker-dealers, government-sponsored enterprises, companies. "
-               "Z.1 runs the Fed about $400bn below the weekly H.4.1 figure (a definitional difference); "
-               "use the Central banks tab for the Fed's level.")
+    st.caption("The Fed doesn't track hedge funds as their own group here; they're folded into Households, which the "
+               "Fed calculates as whatever is left after every other holder is counted. Other = state and local "
+               "governments, broker-dealers, government-sponsored enterprises, companies. The Fed's own holdings show "
+               "about $400bn below its weekly balance sheet because of an accounting difference in this report.")
 
 # ------------------------------------------------------------------ foreign holders
-COUNTRIES = ["Japan", "United Kingdom", "China, Mainland", "Belgium", "Cayman Islands", "Luxembourg",
-             "Canada", "Ireland", "France", "Taiwan", "Switzerland", "Singapore", "Hong Kong", "Norway",
-             "India", "Brazil", "Saudi Arabia", "Korea, South", "United Arab Emirates", "Germany"]
+AGGREGATE = ("Total", "Memo", "Foreign", "All Countries", "International", "All Other")
 with tab_for:
-    tic_all = df[(df.source.str.contains("TIC"))]
-    fa, fo = series("US Treasuries", "Foreign (all)", "TIC"), series("US Treasuries", "Foreign official (all)", "TIC")
-    cust = series("US Treasuries", "Foreign central banks (Fed custody)", "H.4.1")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Foreign holdings", fmt_bn(fa.iloc[-1]), fmt_delta(change(fa, pd.DateOffset(years=1))) + " 1Y")
-    c2.metric("of which foreign official", fmt_bn(fo.iloc[-1]), fmt_delta(change(fo, pd.DateOffset(years=1))) + " 1Y")
-    c3.metric("Central bank custody at the Fed", fmt_bn(cust.iloc[-1]),
-              fmt_delta(change(cust, pd.DateOffset(weeks=4))) + " 4W")
-    st.markdown(f"<div class='asof'>TIC as of {fa.index[-1]:%b %Y} (monthly, ~6 week lag) · "
-                f"Fed custody as of {cust.index[-1]:%d %b %Y} (weekly, the fastest read on central bank selling)</div>",
-                unsafe_allow_html=True)
+    tic_all = df[df.source.str.contains("TIC")]
+    hold = tic_all[tic_all.measure == "holdings"]
+    latest_m = hold.date.max()
+    countries = (hold[(hold.date == latest_m) & ~hold.holder.str.startswith(AGGREGATE)]
+                 .sort_values("amount", ascending=False).holder.tolist())
 
     st.subheader("Who's buying and selling")
     months = sorted(tic_all[tic_all.measure == "net purchases"].date.unique())
@@ -203,9 +136,9 @@ with tab_for:
                              default="3 months", key="netwin", label_visibility="collapsed") or "3 months"
     k = {"Latest month": 1, "3 months": 3, "6 months": 6, "12 months": 12}[n]
     win = months[-k:]
-    net = (tic_all[(tic_all.measure == "net purchases") & tic_all.date.isin(win) & tic_all.holder.isin(COUNTRIES)]
+    net = (tic_all[(tic_all.measure == "net purchases") & tic_all.date.isin(win) & tic_all.holder.isin(countries)]
            .groupby("holder").amount.sum().sort_values())
-    show = pd.concat([net.head(8), net.tail(8)]).drop_duplicates()
+    show = pd.concat([net.head(8), net.tail(8)])
     show = show[~show.index.duplicated()].sort_values()
     fig = go.Figure(go.Bar(x=show.values, y=show.index, orientation="h",
                            marker=dict(color=[BUY if v >= 0 else SELL for v in show.values], line=dict(width=0)),
@@ -215,39 +148,67 @@ with tab_for:
     fig.update_xaxes(tickformat="$,.0f", ticksuffix="bn", gridcolor=GRID, showgrid=True)
     fig.update_yaxes(ticksuffix="", tickformat="", tickfont=dict(color=INK2), showgrid=False)
     st.plotly_chart(fig, width="stretch")
-    st.markdown(f"<div class='asof'>Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · "
-                f"blue = net buyer, red = net seller · US Treasury TIC</div>", unsafe_allow_html=True)
+    asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · blue = net buyer, "
+         f"red = net seller · US Treasury International Capital data (TIC), monthly, about 6 weeks behind")
 
     st.subheader("Holdings by country")
-    pick = st.multiselect("Countries (up to 8)", COUNTRIES, max_selections=8,
-                          default=["Japan", "United Kingdom", "China, Mainland", "Cayman Islands",
-                                   "Belgium", "Switzerland"])  # keep in sync with `core` below
+    core = ["Japan", "United Kingdom", "China, Mainland", "Cayman Islands", "Belgium", "Switzerland"]
+    all_on = st.toggle("Show all countries", key="allc")
+    pick = countries if all_on else st.multiselect("Countries", countries, default=core,
+                                                   label_visibility="collapsed")
     start = window("for", "10Y")
     fig = go.Figure()
-    # default countries keep fixed colours; extra picks take the remaining slots in pick order
-    core = ["Japan", "United Kingdom", "China, Mainland", "Cayman Islands", "Belgium", "Switzerland"]
     free = iter([i for i in range(8) if i >= len(core) or core[i] not in pick])
     for c in pick:
-        slot = core.index(c) if c in core else next(free)
-        line(fig, cut(series("US Treasuries", c, "TIC"), start), c, SERIES[slot])
-    st.plotly_chart(style(fig), width="stretch")
-    st.caption("Belgium, Luxembourg and the Cayman Islands are custody locations: holdings booked there often "
-               "belong to others (China is widely thought to hold some via Belgium; hedge funds via Cayman). "
-               "TIC also has series breaks from annual benchmark surveys.")
-
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.subheader("Official vs private")
-        fig = go.Figure()
-        line(fig, cut(fo, start), "Foreign official", SERIES[0])
-        line(fig, cut((fa - fo).dropna(), start), "Foreign private", SERIES[1])
-        st.plotly_chart(style(fig, 340), width="stretch")
-    with right:
-        st.subheader("Central bank custody at the Fed")
-        fig = go.Figure()
-        line(fig, cut(cust, start), "Custody holdings", SERIES[0])
+        slot = core.index(c) if c in core else next(free, None)
+        color, width = (SERIES[slot], 2) if slot is not None else (OTHER, 1)
+        line(fig, cut(series("US Treasuries", c, "TIC"), start), c, color, width)
+    if len(pick) > 8:
         fig.update_layout(showlegend=False)
-        st.plotly_chart(style(fig, 340), width="stretch")
+    st.plotly_chart(style(fig, 440), width="stretch")
+    asof(f"As of {latest_m:%b %Y} · US Treasury TIC, monthly"
+         + (" · beyond 8 countries the extra lines are grey; hover to see each one" if len(pick) > 8 else ""))
+
+    # sortable table of every country
+    h = hold[hold.holder.isin(countries)].pivot(index="date", columns="holder", values="amount")
+
+    def chg(months_back: int) -> pd.Series:
+        past = h[h.index <= latest_m - pd.DateOffset(months=months_back)]
+        return h.iloc[-1] - past.iloc[-1] if len(past) else pd.Series(dtype=float)
+
+    fa = series("US Treasuries", "Foreign (all)", "TIC")
+    tbl = pd.DataFrame({"Holding ($bn)": h.iloc[-1], "Share of foreign": h.iloc[-1] / fa.iloc[-1] * 100,
+                        "1M change": chg(1), "3M change": chg(3), "12M change": chg(12)}).round(1)
+    tbl = tbl.sort_values("Holding ($bn)", ascending=False)
+    tbl.index.name = "Country"
+    with st.expander(f"All {len(tbl)} countries, latest month ({latest_m:%b %Y})"):
+        st.dataframe(tbl, width="stretch", height=420,
+                     column_config={"Holding ($bn)": st.column_config.NumberColumn(format="$%,.1f"),
+                                    "Share of foreign": st.column_config.NumberColumn(format="%.1f%%"),
+                                    "1M change": st.column_config.NumberColumn(format="%+,.1f"),
+                                    "3M change": st.column_config.NumberColumn(format="%+,.1f"),
+                                    "12M change": st.column_config.NumberColumn(format="%+,.1f")})
+    st.caption("Holdings are recorded by where they sit, not who owns them. Belgium and Luxembourg host big "
+               "custodians (China is widely thought to hold some there). The Cayman Islands is where most hedge "
+               "funds are legally based, so it's the standard stand-in for hedge fund holdings.")
+
+    st.subheader("Foreign holders: official vs private")
+    fo = series("US Treasuries", "Foreign official (all)", "TIC")
+    cust = series("US Treasuries", "Foreign central banks (Fed custody)", "H.4.1")
+    cust_m = cust.resample("ME").last()
+    stack = pd.DataFrame({"Central banks, held at the Fed": cust_m,
+                          "Central banks, held elsewhere": fo - cust_m,
+                          "Private investors": fa - fo}).dropna()
+    start2 = window("off", "10Y")
+    st2 = cut(stack, start2)
+    fig = go.Figure()
+    for i, c in enumerate(stack.columns):
+        fig.add_trace(go.Scatter(x=st2.index, y=st2[c], name=c, stackgroup="one", mode="lines",
+                                 line=dict(width=0.5, color=SURFACE), fillcolor=SERIES[i],
+                                 hovertemplate="%{y:$,.0f}bn"))
+    st.plotly_chart(style(fig, 400), width="stretch")
+    asof(f"Monthly through {stack.index[-1]:%b %Y} · the three layers add up to total foreign holdings · "
+         f"latest weekly custody reading {cust.iloc[-1]:,.0f}bn on {cust.index[-1]:%d %b %Y}")
 
 # ------------------------------------------------------------------ hedge funds
 TENORS = ["2-year", "5-year", "10-year", "Ultra 10-year", "Bond", "Ultra bond"]
@@ -258,18 +219,9 @@ with tab_hf:
     lev = lev[[t for t in TENORS if t in lev.columns]]
     tot = fut.groupby(["date", "holder"]).amount.sum().unstack()
     cay = series("US Treasuries", "Cayman Islands", "TIC")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Leveraged funds net futures", fmt_bn(tot["Leveraged funds"].iloc[-1]),
-              fmt_delta(change(tot["Leveraged funds"], pd.DateOffset(weeks=4))) + " 4W")
-    c2.metric("Asset managers net futures", fmt_bn(tot["Asset managers"].iloc[-1]),
-              fmt_delta(change(tot["Asset managers"], pd.DateOffset(weeks=4))) + " 4W")
-    c3.metric("Cayman Islands cash Treasuries", fmt_bn(cay.iloc[-1]),
-              fmt_delta(change(cay, pd.DateOffset(years=1))) + " 1Y")
-    st.markdown(f"<div class='asof'>CFTC as of {tot.index[-1]:%d %b %Y} (weekly) · TIC Cayman as of "
-                f"{cay.index[-1]:%b %Y} (monthly) · futures shown at face value</div>", unsafe_allow_html=True)
     start = window("hf", "5Y")
 
-    st.subheader("Leveraged funds net futures by maturity")
+    st.subheader("Hedge fund net futures by maturity")
     lv = cut(lev, start)
     fig = go.Figure()
     for i, t in enumerate(lv.columns):
@@ -277,23 +229,22 @@ with tab_hf:
                              hovertemplate="%{y:$,.0f}bn"))
     fig.update_layout(barmode="relative", bargap=0.1)
     st.plotly_chart(style(fig, 400), width="stretch")
+    asof(f"As of {lev.index[-1]:%d %b %Y} · CFTC Traders in Financial Futures, weekly · 'leveraged funds' "
+         f"category · face value of contracts · below zero = net short")
 
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.subheader("Hedge funds vs asset managers")
-        fig = go.Figure()
-        t2 = cut(tot, start)
-        line(fig, t2["Leveraged funds"], "Leveraged funds", SERIES[0])
-        line(fig, t2["Asset managers"], "Asset managers", SERIES[1])
-        st.plotly_chart(style(fig, 340), width="stretch")
-    with right:
-        st.subheader("Cayman Islands cash Treasuries")
-        fig = go.Figure()
-        line(fig, cut(cay, start), "Cayman Islands", SERIES[0])
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(style(fig, 340), width="stretch")
-    st.caption("Leveraged funds short futures while holding cash Treasuries (the basis trade); asset managers are "
-               "the mirror image, long futures. Cayman holdings are the usual proxy for hedge fund cash bonds.")
+    st.subheader("The basis trade")
+    fig = go.Figure()
+    t2 = cut(tot, start)
+    line(fig, -t2["Leveraged funds"], "Hedge funds: futures short", SERIES[0])
+    line(fig, t2["Asset managers"], "Asset managers: futures long", SERIES[1])
+    line(fig, cut(cay, start), "Cayman Islands: cash Treasuries", SERIES[2])
+    st.plotly_chart(style(fig, 400), width="stretch")
+    asof(f"Futures as of {tot.index[-1]:%d %b %Y} (weekly) · Cayman as of {cay.index[-1]:%b %Y} (monthly, TIC)")
+    st.caption("Asset managers (pension and bond funds) buy futures as a cheap way to own Treasuries. Hedge funds "
+               "take the other side, selling the futures and buying the actual bonds with borrowed money, pocketing "
+               "the small price gap between the two. That's why the two futures lines mirror each other, and why "
+               "hedge fund cash holdings (proxied by Cayman) rise as the short grows. Not every hedge fund is in "
+               "Cayman, so the cash line understates the true long.")
 
 # ------------------------------------------------------------------ sources
 with tab_src:
@@ -303,9 +254,7 @@ with tab_src:
         "Fed Z.1 Financial Accounts (quarterly)": "https://www.federalreserve.gov/releases/z1/",
         "US Treasury TIC (monthly)": "https://home.treasury.gov/data/treasury-international-capital-tic-system",
         "CFTC Traders in Financial Futures (weekly)": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/",
-        "SNB balance sheet (monthly, converted to USD)": "https://data.snb.ch/en/topics/snb#!/cube/snbbipo",
     })
-    st.dataframe(fresh, width="stretch",
-                 column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
+    st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
     st.caption("Data refreshes daily via GitHub Actions; each source keeps its last good copy if a download fails.")
     st.download_button("Download master table (CSV)", DATA.read_bytes(), "holdings.csv", "text/csv")
