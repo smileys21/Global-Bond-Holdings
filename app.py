@@ -95,8 +95,9 @@ def cut(s, start):
 st.title("Global Bond Tool")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
-tab_us, tab_jp, tab_oth, tab_hf, tab_chk, tab_src = st.tabs(
-    ["United States", "Japan", "Other countries", "Hedge funds (US Treasuries)", "Data checks", "Sources"])
+tab_us, tab_jp, tab_oth, tab_hf, tab_auc, tab_chk, tab_src = st.tabs(
+    ["United States", "Japan", "Other countries", "Hedge funds (US Treasuries)", "US Treasury auctions",
+     "Data checks", "Sources"])
 
 # ------------------------------------------------------------------ shared pieces
 HOLDER_ORDER = ["Foreign", "Central bank", "Central bank & banks", "Banks", "Insurers", "Insurers & pension funds",
@@ -606,6 +607,101 @@ with tab_hf:
                 f"Form PF, released about 2.5 months after quarter end.")
 
 
+
+# ================================================================== US TREASURY AUCTIONS
+AUCTIONS = Path(__file__).parent / "data" / "auctions.csv"
+TENORS_A = ["2-Year", "3-Year", "5-Year", "7-Year", "10-Year", "20-Year", "30-Year"]
+METRICS = {"Bid-to-cover": ("bid_to_cover", "x", True),
+           "Dealer takedown (%)": ("dealer_pct", "%", False),
+           "Indirect bidders, mostly foreign (%)": ("indirect_pct", "%", True),
+           "Direct bidders, mostly US funds (%)": ("direct_pct", "%", True),
+           "High yield (%)": ("high_yield", "%", None),
+           "High vs median yield (bp)": ("dispersion_bp", "bp", False),
+           "Size ($bn)": ("size_bn", "bn", None)}
+
+
+@st.cache_data(ttl=3600)
+def load_auctions(version: float) -> pd.DataFrame:
+    return pd.read_csv(AUCTIONS, parse_dates=["date"])
+
+
+with tab_auc:
+    if not AUCTIONS.exists():
+        st.warning("Auction data hasn't been downloaded yet; it arrives with the next daily refresh.")
+    else:
+        au = load_auctions(AUCTIONS.stat().st_mtime)
+        with st.expander("How to read auction results", expanded=False):
+            st.markdown(
+                "- **Bid-to-cover**: dollars bid for every dollar sold. Higher = more demand.\n"
+                "- **Dealer takedown**: share left with the primary dealers, the banks obliged to bid. They're the "
+                "buyer of last resort, so a high share means end investors stepped back. Lower = stronger.\n"
+                "- **Indirect bidders**: bids placed through dealers, mostly foreign central banks and big asset "
+                "managers. The usual read on foreign demand.\n"
+                "- **Direct bidders**: bids placed straight with the Treasury, mostly US funds and banks.\n"
+                "- **High vs median yield**: how far the cut-off yield sat above the middle accepted bid. A wider gap "
+                "means the auction had to reach further for buyers.\n"
+                "- Strong/weak is judged against the average of that maturity's previous 6 auctions.\n"
+                "- Not shown: the 'tail' (auction yield vs the market yield at the 1pm deadline). It needs "
+                "when-issued market prices, which aren't published free.")
+
+        st.header("Latest auction for each maturity")
+        rows_ = []
+        for t in TENORS_A:
+            a = au[au.tenor == t].sort_values("date")
+            if len(a) < 7:
+                continue
+            last, prev = a.iloc[-1], a.iloc[-7:-1]
+            btc_d = last.bid_to_cover - prev.bid_to_cover.mean()
+            dlr_d = last.dealer_pct - prev.dealer_pct.mean()
+            ind_d = last.indirect_pct - prev.indirect_pct.mean()
+            score = int(btc_d > 0) + int(dlr_d < 0) + int(ind_d > 0)
+            rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}", "Type": "Reopening" if last.reopening else "New",
+                          "Size ($bn)": f"{last.size_bn:,.0f}", "High yield (%)": f"{last.high_yield:.3f}",
+                          "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
+                          "Dealers (%)": f"{last.dealer_pct:.1f} ({dlr_d:+.1f})",
+                          "Indirect (%)": f"{last.indirect_pct:.1f} ({ind_d:+.1f})",
+                          "Direct (%)": f"{last.direct_pct:.1f}",
+                          "Read": {3: "Strong", 2: "Solid", 1: "Soft", 0: "Weak"}[int(score)]})
+        st.table(pd.DataFrame(rows_).set_index("Maturity"))
+        asof("Figures in brackets = change vs the average of that maturity's previous 6 auctions · Read counts how "
+             "many of bid-to-cover (up), dealers (down) and indirect (up) beat that average: 3 Strong, 2 Solid, "
+             "1 Soft, 0 Weak · TreasuryDirect auction results")
+
+        st.header("History by maturity")
+        tenor = st.segmented_control("Maturity", TENORS_A, default="10-Year", key="au_tenor") or "10-Year"
+        metric = st.segmented_control("Metric", list(METRICS), default="Bid-to-cover", key="au_metric") \
+            or "Bid-to-cover"
+        col, unit, _ = METRICS[metric]
+        a = au[au.tenor == tenor].set_index("date").sort_index()
+        a = cut(a, window("au_win", "5Y"))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=a.index, y=a[col], name="Each auction", mode="lines+markers",
+                                 line=dict(color=SERIES[0], width=1.5), marker=dict(size=7),
+                                 customdata=a[["term"]].values,
+                                 hovertemplate="%{x|%d %b %Y} · %{customdata[0]}<br>%{y:.2f}<extra></extra>"))
+        avg = a[col].rolling(6, min_periods=3).mean()
+        fig.add_trace(go.Scatter(x=avg.index, y=avg.values, name="6-auction average", mode="lines",
+                                 line=dict(color=MUTED, width=2, dash="dot"), hovertemplate="%{y:.2f}"))
+        yfmt, ysuf = {"x": (".2f", "x"), "%": (".1f", "%"), "bp": (".1f", "bp"), "bn": ("$,.0f", "bn")}[unit]
+        fig = style(fig, 400, yfmt, ysuf)
+        fig.update_layout(hovermode="closest")
+        st.plotly_chart(fig, width="stretch", key="au_chart")
+        asof(f"{len(a)} {tenor} auctions in range, new issues and reopenings · TreasuryDirect, updated the day of "
+             f"each auction")
+
+        st.header("Demand mix over time")
+        a2 = au[au.tenor == tenor].set_index("date").sort_index()
+        a2 = cut(a2, window("au_mix", "5Y"))
+        fig = go.Figure()
+        for i, (c, n) in enumerate([("indirect_pct", "Indirect (mostly foreign)"), ("direct_pct", "Direct (mostly US funds)"),
+                                    ("dealer_pct", "Dealers (left over)")]):
+            fig.add_trace(go.Bar(x=a2.index, y=a2[c], name=n, marker=dict(color=SERIES[[0, 2, 7][i]], line=dict(width=0)),
+                                 hovertemplate="%{y:.1f}%"))
+        fig.update_layout(barmode="stack", bargap=0.15)
+        st.plotly_chart(style(fig, 360, ".0f", "%"), width="stretch", key="au_mixchart")
+        asof(f"Share of the competitive auction taken by each group, {tenor} · TreasuryDirect")
+
+
 # ------------------------------------------------------------------ data checks
 def _s(market: str, holder: str, src: str, measure: str = "holdings") -> pd.Series:
     x = df[(df.market == market) & (df.holder == holder) & (df.measure == measure)
@@ -725,6 +821,9 @@ with tab_chk:
 # ------------------------------------------------------------------ sources
 with tab_src:
     fresh = (df.groupby("source").date.max().rename("Latest data").dt.strftime("%d %b %Y").to_frame())
+    if AUCTIONS.exists():
+        fresh.loc["TreasuryDirect auction results (per auction)"] = \
+            f"{load_auctions(AUCTIONS.stat().st_mtime).date.max():%d %b %Y}"
     fresh["Link"] = fresh.index.map({
         "Fed H.4.1 (weekly)": "https://www.federalreserve.gov/releases/h41/",
         "Fed Z.1 Financial Accounts (quarterly)": "https://www.federalreserve.gov/releases/z1/",
@@ -738,6 +837,7 @@ with tab_src:
         "IMF international investment position (quarterly)": "https://data.imf.org/",
         "US Treasury TIC US holdings abroad (monthly)": "https://home.treasury.gov/data/treasury-international-capital-tic-system",
         "OFR Hedge Fund Monitor, SEC Form PF (quarterly)": "https://www.financialresearch.gov/hedge-fund-monitor/",
+        "TreasuryDirect auction results (per auction)": "https://www.treasurydirect.gov/auctions/auction-query/",
     })
     st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
     st.caption("Data refreshes daily via GitHub Actions; each source keeps its last good copy if a download fails.")

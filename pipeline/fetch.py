@@ -493,6 +493,41 @@ def ofr() -> list[pd.DataFrame]:
     return out
 
 
+# ------------------------------------------------------------------ US Treasury auctions (TreasuryDirect)
+AUCTIONS_OUT = ROOT / "data" / "auctions.csv"
+TD = "https://www.treasurydirect.gov/TA_WS/securities/search"
+TENOR_ORDER = ["2-Year", "3-Year", "5-Year", "7-Year", "10-Year", "20-Year", "30-Year"]
+
+
+def auctions() -> pd.DataFrame:
+    """Every nominal note and bond auction since 2008 with the published demand metrics."""
+    recs = []
+    for t in ["Note", "Bond"]:
+        r = requests.get(TD, params={"type": t, "startDate": "2008-01-01", "endDate": "2099-12-31",
+                                     "format": "json"}, headers=UA, timeout=180)
+        r.raise_for_status()
+        recs += r.json()
+    d = pd.DataFrame(recs)
+    d = d[(d["tips"] != "Yes") & (d["floatingRate"] != "Yes")]
+    num = lambda c: pd.to_numeric(d[c].replace("", None), errors="coerce")  # noqa: E731
+    out = pd.DataFrame({
+        "date": pd.to_datetime(d["auctionDate"]).dt.normalize(),
+        "tenor": d["originalSecurityTerm"].str.replace(r"^29-Year.*", "30-Year", regex=True),
+        "term": d["securityTerm"], "reopening": d["reopening"].eq("Yes"), "cusip": d["cusip"],
+        "size_bn": num("offeringAmount") / 1e9,
+        "high_yield": num("highYield"), "median_yield": num("averageMedianYield"),
+        "bid_to_cover": num("bidToCoverRatio"),
+        "dealer": num("primaryDealerAccepted"), "direct": num("directBidderAccepted"),
+        "indirect": num("indirectBidderAccepted"),
+    })
+    tot = out[["dealer", "direct", "indirect"]].sum(axis=1)
+    for c in ["dealer", "direct", "indirect"]:
+        out[f"{c}_pct"] = out[c] / tot * 100
+    out["dispersion_bp"] = (out["high_yield"] - out["median_yield"]) * 100
+    out = out[out["tenor"].isin(TENOR_ORDER) & out["high_yield"].notna()]
+    return out.drop(columns=["dealer", "direct", "indirect"]).sort_values("date")
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
     jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC (": tic, "CFTC": cftc,
@@ -519,6 +554,12 @@ def main() -> int:
     OUT.parent.mkdir(exist_ok=True)
     df.to_csv(OUT, index=False, date_format="%Y-%m-%d")
     print(f"wrote {len(df):,} rows -> {OUT}")
+    try:
+        au = auctions()
+        au.to_csv(AUCTIONS_OUT, index=False, date_format="%Y-%m-%d")
+        print(f"ok   auctions: {len(au):,} rows -> {AUCTIONS_OUT}")
+    except Exception as e:  # keep the last good file
+        print(f"FAIL auctions: {e}", file=sys.stderr)
     return 1 if len(failed) == len(jobs) else 0
 
 

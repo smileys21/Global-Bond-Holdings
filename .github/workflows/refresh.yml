@@ -22,6 +22,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add data/holdings.csv
+          git add data/holdings.csv data/auctions.csv
           git diff --cached --quiet || git commit -m "Data refresh $(date -u +%F)"
           git push
