@@ -42,7 +42,7 @@ def series(market: str, holder: str, src: str, measure: str = "holdings") -> pd.
 
 
 def asof(text: str) -> None:
-    st.markdown(f"<div class='asof'>{text}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='asof'>{text.replace('$', '&#36;')}</div>", unsafe_allow_html=True)
 
 
 def style(fig: go.Figure, height: int = 380, yfmt: str = "$,.0f", ysuffix: str = "bn") -> go.Figure:
@@ -95,7 +95,8 @@ def cut(s, start):
 st.title("Global Bond Tool")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
-tab_own, tab_x, tab_hf, tab_src = st.tabs(["Ownership", "Cross-border flows", "Hedge funds", "Sources"])
+tab_own, tab_x, tab_hf, tab_src = st.tabs(
+    ["Ownership", "Cross-border flows", "Hedge funds (US Treasuries)", "Sources"])
 
 # ------------------------------------------------------------------ ownership
 MARKETS = {"US": "US Treasuries", "Japan": "Japanese government bonds", "UK": "UK gilts",
@@ -166,13 +167,16 @@ with tab_own:
     last = z.iloc[-1]
     share = z.div(total, axis=0) * 100
     yago = share[share.index <= z.index[-1] - pd.DateOffset(years=1)]
+    zago = z[z.index <= z.index[-1] - pd.DateOffset(years=1)]
     tbl = pd.DataFrame({"Holding ($bn)": last.round(0), "Share": share.iloc[-1].round(1),
+                        "1Y change ($bn)": (last - zago.iloc[-1]).round(0) if len(zago) else None,
                         "1Y change in share (pts)": (share.iloc[-1] - yago.iloc[-1]).round(1) if len(yago) else None})
     tbl = tbl.sort_values("Holding ($bn)", ascending=False)
     tbl.index.name = "Holder"
     st.dataframe(tbl, width="stretch",
                  column_config={"Holding ($bn)": st.column_config.NumberColumn(format="$%,d"),
                                 "Share": st.column_config.NumberColumn(format="%.1f%%"),
+                                "1Y change ($bn)": st.column_config.NumberColumn(format="%+,d"),
                                 "1Y change in share (pts)": st.column_config.NumberColumn(format="%+.1f")})
     st.caption(note)
 
@@ -189,7 +193,7 @@ def window_pick(key: str) -> list:
 with tab_x:
     view = st.segmented_control(
         "View", ["Into US Treasuries", "Into US stocks & bonds", "Japanese investors abroad",
-                 "Foreign assets vs reserves"],
+                 "Where countries keep their foreign savings"],
         default="Into US Treasuries", key="xview", label_visibility="collapsed") or "Into US Treasuries"
 
     # ---------------- US Treasuries by country
@@ -226,12 +230,8 @@ with tab_x:
             fig.add_trace(go.Scatter(x=cut(fa, start).index, y=cut(fa, start).values, name="Total, all countries",
                                      mode="lines", line=dict(color=MUTED, width=2, dash="dot"),
                                      hovertemplate="%{y:$,.0f}bn"))
-        fig = style(fig, 440)
-        if show_total:  # log scale so the $9tn total doesn't flatten the countries
-            fig.update_yaxes(type="log", tickvals=[25, 50, 100, 250, 500, 1000, 2500, 5000, 10000])
-        st.plotly_chart(fig, width="stretch")
-        asof(f"As of {latest_m:%b %Y} · US Treasury TIC, monthly · defaults to the 8 largest holders"
-             + (" · log scale, so equal distances mean equal % changes" if show_total else ""))
+        st.plotly_chart(style(fig, 440), width="stretch")
+        asof(f"As of {latest_m:%b %Y} · US Treasury TIC, monthly · defaults to the 8 largest holders")
         st.caption("Holdings are recorded by where they sit, not who owns them. Belgium and Luxembourg host big "
                    "custodians (China is widely thought to hold some there). The Cayman Islands is where most hedge "
                    "funds are legally based, so it's the standard stand-in for hedge fund holdings.")
@@ -332,28 +332,68 @@ with tab_x:
         asof("Running total of monthly net purchases from the start of the selected range · a falling line = "
              "steady selling")
 
-        st.subheader("Foreign investors in Japanese government bonds")
+        st.subheader("Repatriation: are Japanese investors bringing money home?")
+        ja = df[df.market == "Japanese investors abroad (all securities)"].pivot(
+            index="date", columns="holder", values="amount")
+        ja = cut(ja[["Foreign stocks & funds", "Foreign bonds (long-term)", "Foreign bonds (short-term)"]],
+                 window("jprep", "3Y"))
+        fig = go.Figure()
+        for i, c in enumerate(ja.columns):
+            fig.add_trace(go.Bar(x=ja.index, y=ja[c], name=c, marker=dict(color=SERIES[i], line=dict(width=0)),
+                                 hovertemplate="%{y:$,.1f}bn"))
+        fig.update_layout(barmode="relative", bargap=0.15)
+        st.plotly_chart(style(fig, 380), width="stretch")
+        asof(f"Monthly through {ja.index[-1]:%b %Y} · Japanese investors' net purchases of all foreign stocks and "
+             f"bonds · below zero = selling abroad and bringing money home (repatriation)")
+
+        st.subheader("Private investors vs the Ministry of Finance")
+        res = series("Japan official reserves", "Ministry of Finance", "BoJ balance of payments")
+        priv = df[(df.market == "Japanese investors abroad") & (df.holder == "All countries")].set_index("date").amount
+        pv = pd.DataFrame({"Private investors: net purchases of foreign government bonds": priv,
+                           "Ministry of Finance: change in FX reserves": res.diff()})
+        pv = cut(pv, window("jppv", "3Y"))
+        fig = go.Figure()
+        for i, c in enumerate(pv.columns):
+            fig.add_trace(go.Bar(x=pv.index, y=pv[c], name=c, marker=dict(color=SERIES[i], line=dict(width=0)),
+                                 hovertemplate="%{y:$,.1f}bn"))
+        fig.update_layout(barmode="group", bargap=0.2)
+        st.plotly_chart(style(fig, 380), width="stretch")
+        asof(f"Reserves monthly through {res.index[-1]:%b %Y} (IMF via FRED) · private flows through "
+             f"{priv.index.max():%b %Y} · reserve changes also include currency and price moves")
+        st.caption("Japan's FX reserves are owned by the Ministry of Finance and are what it sells to intervene. "
+                   "A big drop in reserves with no matching private selling is intervention. This is why the Into "
+                   "US Treasuries view can show Japan selling far more than this view: in May–July 2026 TIC shows "
+                   "Japan selling \\$88.6bn of Treasuries, \\$73bn of it bills, while reserves fell \\$75bn in May alone. "
+                   "Private investors sold only \\$4.7bn of long-term US government bonds over the same months.")
+
+        st.subheader("Who's buying and selling Japanese bonds")
+        jb = df[df.market == "Japanese bonds by buyer"]
+        k2 = window_pick("jbwin")
+        bm = sorted(jb.date.unique())[-k2:]
+        st.plotly_chart(buysell(jb[jb.date.isin(bm)].groupby("holder").amount.sum().sort_values()), width="stretch")
+        asof(f"Net purchases {pd.Timestamp(bm[0]):%b %Y} to {pd.Timestamp(bm[-1]):%b %Y} · foreign investors' net "
+             f"purchases of Japanese long-term bonds, by investor country · Japan balance of payments")
+
         fj = series("Japanese government bonds", "Foreign", "BoJ balance of payments", "net purchases")
         fjc = cut(fj, window("jpf", "3Y"))
         fig = go.Figure(go.Bar(x=fjc.index, y=fjc.values,
                                marker=dict(color=[BUY if v >= 0 else SELL for v in fjc.values], line=dict(width=0)),
                                hovertemplate="%{y:$,.1f}bn<extra></extra>"))
-        fig = style(fig, 360)
+        fig = style(fig, 320)
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
-        asof(f"Monthly through {fj.index[-1]:%b %Y} · foreign net purchases of long-term Japanese government "
-             f"bonds · Japan balance of payments via Bank of Japan")
-        st.caption("Government bonds only, long-term (over 1 year). These flows are mostly private investors (life "
-                   "insurers, banks, pension funds); Japan's own reserves are run separately by the Ministry of "
-                   "Finance and show up under Into US Treasuries as official selling. Converted to USD at each "
-                   "month's average exchange rate.")
+        asof(f"Monthly through {fj.index[-1]:%b %Y} · all foreign investors' net purchases of long-term Japanese "
+             f"government bonds")
+        st.caption("Japan publishes buying by country but not holdings by country, so unlike the US view there is "
+                   "no country holdings chart. Country figures cover all Japanese long-term bonds (mostly government). "
+                   "Converted to USD at each month's average exchange rate.")
 
     # ---------------- foreign assets vs reserves
     else:
         fa_ = df[df.market == "Foreign assets"].copy()
         fa_[["country", "group"]] = fa_.holder.str.split("|", expand=True)
         countries = list(dict.fromkeys(fa_.country))
-        st.subheader("Foreign stocks and bonds held by each country, vs official reserves")
+        st.subheader("Where countries keep their foreign savings")
         who = st.segmented_control("Country", countries, default="South Korea", key="iipc",
                                    label_visibility="collapsed") or "South Korea"
         c = fa_[fa_.country == who].pivot(index="date", columns="group", values="amount")
@@ -371,11 +411,20 @@ with tab_x:
         st.plotly_chart(style(fig, 440), width="stretch")
         asof(f"As of {latest:%d %b %Y} · IMF international investment position data, quarterly · foreign stocks and "
              f"bonds at market value, by who holds them in the home country, plus central bank reserves")
-        st.caption("Shows whether a country's dollars pile up at the central bank (reserves) or get recycled by "
-                   "pension funds, insurers and households into foreign markets. China and Switzerland don't break "
-                   "out who holds the portfolio, so they show one combined layer. For South Korea, the government "
-                   "layer is mostly the National Pension Service and the Korea Investment Corporation (the "
-                   "sovereign wealth fund). Pair this with Into US stocks & bonds to see where the money goes.")
+        with st.expander("How to read this chart", expanded=True):
+            st.markdown(
+                "- A country that sells more abroad than it buys (like Korea with chip exports) earns dollars. Those "
+                "dollars end up in one of two places.\n"
+                "- **Bottom layer (blue)**: the central bank keeps them as official reserves, mostly safe government "
+                "bonds, largely US Treasuries.\n"
+                "- **Other layers**: pension funds, insurers, households and companies take them and buy foreign "
+                "stocks and bonds themselves.\n"
+                "- When the blue layer is flat and the others grow, the country is recycling its dollars privately. "
+                "That keeps money flowing out and the currency weaker than its trade surplus alone would suggest.\n"
+                "- Values are at market prices, so stock market moves change the size too. For Korea, the government "
+                "layer is mostly the National Pension Service and the Korea Investment Corporation.")
+        st.caption("China and Switzerland don't say who holds their foreign portfolio, so it shows as one combined "
+                   "layer. Use Into US stocks & bonds to see how much of this lands in US markets.")
 
 # ------------------------------------------------------------------ hedge funds
 TENORS = ["2-year", "5-year", "10-year", "Ultra 10-year", "Bond", "Ultra bond"]
@@ -398,7 +447,15 @@ with tab_hf:
     asof(f"As of {lev.index[-1]:%d %b %Y} · CFTC Traders in Financial Futures, weekly · 'leveraged funds' "
          f"category · face value of contracts · below zero = net short")
 
-    st.subheader("The basis trade: who's on each side of the futures")
+    with st.expander("Why this matters", expanded=True):
+        st.markdown(
+            "- Hedge funds run a roughly \\$1tn trade called the **basis trade**: they buy Treasury bonds with borrowed "
+            "money and sell Treasury futures against them, pocketing the small price gap between the two.\n"
+            "- It's very leveraged. When it unwinds in a hurry (March 2020, April 2025), hedge funds dump bonds all "
+            "at once, Treasury yields jump, and in 2020 the Fed had to step in.\n"
+            "- So the size of this trade, and whether it's shrinking, tells you how fragile the Treasury market is.\n"
+            "- The two charts below show its two legs: the futures (sold) and the actual bonds (held).")
+    st.subheader("Leg 1, the futures: who's on each side")
     t2 = cut(tot, start)
     fig = go.Figure()
     line(fig, t2["Asset managers"], "Asset managers (long)", SERIES[1])
@@ -406,8 +463,12 @@ with tab_hf:
     line(fig, -t2["Dealers"], "Dealers (short)", SERIES[2])
     st.plotly_chart(style(fig, 380), width="stretch")
     asof(f"As of {tot.index[-1]:%d %b %Y} · CFTC, weekly · shorts shown as positive so the sides can be compared")
+    st.caption("How to read it: every futures contract has a buyer and a seller. Asset managers (pension and bond "
+               "funds) are the main buyers. The hedge fund line is roughly the size of the basis trade. When the hedge "
+               "fund line falls while the asset manager line holds steady, someone else has to take the selling side, "
+               "here dealers (big banks), whose line has been rising.")
 
-    st.subheader("Hedge fund cash Treasuries (Cayman Islands)")
+    st.subheader("Leg 2, the bonds: hedge fund Treasury holdings")
     cay = pd.DataFrame({"Notes & bonds (basis trade leg)": series("US Treasury notes & bonds (Cayman)",
                                                                    "Cayman Islands", "TIC (monthly)"),
                         "Bills (cash parking)": series("US Treasury bills (Cayman)", "Cayman Islands",
@@ -419,13 +480,12 @@ with tab_hf:
                                  line=dict(width=0.5, color=SURFACE), fillcolor=SERIES[i * 4],
                                  hovertemplate="%{y:$,.0f}bn"))
     st.plotly_chart(style(fig, 340), width="stretch")
-    asof(f"Monthly through {cay.index[-1]:%b %Y} · US Treasury TIC · split available from 2020")
-    st.caption("How the trade works: asset managers (pension and bond funds) buy futures as a cheap way to own "
-               "Treasuries. Hedge funds sell them those futures and buy the actual notes and bonds with borrowed "
-               "money, earning the small price gap. If hedge funds are unwinding, you should see two things together: "
-               "their futures short shrinking and their cash notes and bonds falling. Dealers stepping in on the "
-               "short side, or hedge funds switching into bills, are signs the trade is being cut rather than "
-               "simply rolled.")
+    asof(f"Monthly through {cay.index[-1]:%b %Y} · Treasuries held in the Cayman Islands, where most hedge funds "
+         f"are registered · US Treasury TIC · split available from 2020")
+    st.caption("How to read it: the blue layer is the bonds hedge funds hold against their futures short. If the "
+               "trade is being unwound, blue falls at the same time as the hedge fund line in Leg 1, and those bond "
+               "sales hit the market. Money moving from blue into bills (pink) means funds are pulling back into "
+               "cash-like holdings rather than rolling the trade.")
 
 # ------------------------------------------------------------------ sources
 with tab_src:

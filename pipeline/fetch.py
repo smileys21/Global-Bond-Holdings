@@ -282,11 +282,19 @@ JP_SOV_DEST = {"US": "United States", "CA": "Canada", "AU": "Australia", "DE": "
                "HK": "Hong Kong", "SE": "Sweden", "OT": "Other countries"}
 
 
+JP_BUYERS = {"US": "United States", "GB": "United Kingdom", "FR": "France", "DE": "Germany", "CH": "Switzerland",
+             "NL": "Netherlands", "BE": "Belgium", "LX": "Luxembourg", "IE": "Ireland", "CI": "Cayman Islands",
+             "CA": "Canada", "AU": "Australia", "HK": "Hong Kong", "SG": "Singapore", "CN": "China",
+             "TW": "Taiwan", "KR": "South Korea", "NO": "Norway", "SE": "Sweden", "SA": "Saudi Arabia",
+             "AE": "UAE", "BM": "Bermuda", "II": "International organizations"}
+
+
 def japan_flows() -> list[pd.DataFrame]:
     """Monthly: Japanese investors' net purchases of long-term foreign government bonds by issuer country,
     and foreign investors' net purchases of long-term Japanese government bonds."""
     src = "BoJ balance of payments (monthly)"
-    codes = [f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113"]
+    codes = ([f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113", "BPBP6JYNFA21", "BPBP6JYNFA221",
+             "BPBP6JYNFA222"] + [f"BPPI6E3N9{c}" for c in JP_BUYERS])
     d = boj("BP01", codes, "201401")
     d.index = [pd.Period(f"{i[:4]}-{i[4:]}", "M").end_time.normalize() for i in d.index]
     fx = 1 / fred("EXJPUS")  # monthly average USD per JPY
@@ -299,6 +307,18 @@ def japan_flows() -> list[pd.DataFrame]:
                     "net purchases", src))
     out.append(rows(conv(d["BPBP6JYNFL22113"].dropna()), "Japanese government bonds", "Foreign",
                     "net purchases", src))
+    # all foreign securities bought by Japanese investors (negative = repatriation)
+    for code, label in [("BPBP6JYNFA21", "Foreign stocks & funds"), ("BPBP6JYNFA221", "Foreign bonds (long-term)"),
+                        ("BPBP6JYNFA222", "Foreign bonds (short-term)")]:
+        out.append(rows(conv(d[code].dropna()), "Japanese investors abroad (all securities)", label,
+                        "net purchases", src))
+    # who is buying Japanese long-term bonds, by investor country
+    for c, name in JP_BUYERS.items():
+        if f"BPPI6E3N9{c}" in d:
+            out.append(rows(conv(d[f"BPPI6E3N9{c}"].dropna()), "Japanese bonds by buyer", name, "net purchases", src))
+    # Japan's official reserves (run by the Ministry of Finance), monthly, IMF via FRED
+    out.append(rows(fred("TRESEGJPM052N").pipe(lambda x: x.set_axis(x.index + pd.offsets.MonthEnd(0))) / 1e3,
+                    "Japan official reserves", "Ministry of Finance", "holdings", src))
     return out
 
 
