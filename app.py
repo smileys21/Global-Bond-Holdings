@@ -216,8 +216,8 @@ def running_total(wide: pd.DataFrame, default: list, key: str, note: str) -> Non
 TIC3 = "US Treasury TIC (monthly)"
 TIC1 = "US Treasury TIC long-term securities (monthly)"
 TIC2 = "US Treasury TIC US holdings abroad (monthly)"
-US_ASSETS = {"Treasuries (incl. bills)": (TIC3, "US Treasuries"),
-             "Treasury notes & bonds": (TIC1, "US Treasury notes & bonds"),
+US_ASSETS = {"All Treasuries (incl. bills)": (TIC3, "US Treasuries"),
+             "Long-term Treasuries (notes & bonds)": (TIC1, "US Treasury notes & bonds"),
              "Agency bonds": (TIC1, "US agency bonds"), "Corporate bonds": (TIC1, "US corporate bonds"),
              "Stocks": (TIC1, "US stocks")}
 PORTFOLIO = ["US stocks", "US corporate bonds", "US agency bonds", "US Treasury notes & bonds"]
@@ -268,9 +268,9 @@ with tab_us:
     ownership("US Treasuries", "us")
 
     section(2, "Foreign investors: who's buying and selling US securities")
-    st.subheader("Ranking")
-    asset = st.segmented_control("Asset", list(US_ASSETS), default="Treasuries (incl. bills)", key="us_asset",
-                                 label_visibility="collapsed") or "Treasuries (incl. bills)"
+    st.subheader("Net buyers and sellers by country")
+    asset = st.segmented_control("Asset", list(US_ASSETS), default="All Treasuries (incl. bills)", key="us_asset",
+                                 label_visibility="collapsed") or "All Treasuries (incl. bills)"
     src, mkt = US_ASSETS[asset]
     k = window_pick("us_win")
     flows = df[(df.source == src) & (df.market == mkt) & (df.measure == "net purchases")]
@@ -278,10 +278,12 @@ with tab_us:
     countries3 = tic_countries(TIC3)
     net = flows[flows.date.isin(win) & flows.holder.isin(countries3)].groupby("holder").amount.sum().sort_values()
     st.plotly_chart(buysell(net), width="stretch")
-    asof(f"Net purchases of {asset.lower()}, {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · "
-         f"blue = net buyer, red = net seller · US Treasury TIC, monthly, about 6 weeks behind")
+    asof(f"Net purchases of {asset[0].lower() + asset[1:]}, {pd.Timestamp(win[0]):%b %Y} to "
+         f"{pd.Timestamp(win[-1]):%b %Y} · blue = net buyer, red = net seller · US Treasury TIC, monthly, about 6 "
+         f"weeks behind · comparing the two Treasury views separates bill trading (cash management, central bank "
+         f"intervention) from long-term bond buying (lasting demand for duration)")
 
-    st.subheader("Over time: Treasury holdings by country")
+    st.subheader("Treasury holdings by country")
     fa = series("US Treasuries", "Foreign (all)", TIC3)
     pick = st.multiselect("Countries (up to 8)", countries3, default=countries3[:8], max_selections=8, key="us_hold",
                           label_visibility="collapsed")
@@ -304,7 +306,7 @@ with tab_us:
                "foreign central banks and funds holding through London). The Cayman Islands is where most hedge "
                "funds are registered.")
 
-    st.subheader("Over time: one country's US portfolio")
+    st.subheader("Country detail: holdings of US securities")
     countries1 = tic_countries(TIC1)
     who = st.selectbox("Country", countries1, index=countries1.index("Japan") if "Japan" in countries1 else 0,
                        key="us_pfwho")
@@ -312,7 +314,7 @@ with tab_us:
 
     section(3, "US investors abroad")
     ab_assets = ["Foreign government bonds", "Foreign corporate bonds", "Foreign stocks"]
-    st.subheader("Ranking")
+    st.subheader("Net buying and selling by country")
     asset = st.segmented_control("Asset", ab_assets, default="Foreign government bonds", key="ab_asset",
                                  label_visibility="collapsed") or "Foreign government bonds"
     k = window_pick("ab_win")
@@ -325,7 +327,7 @@ with tab_us:
     asof(f"US investors' net purchases of {asset.lower()}, {pd.Timestamp(win[0]):%b %Y} to "
          f"{pd.Timestamp(win[-1]):%b %Y} · by the issuer's country · US Treasury TIC, monthly")
 
-    st.subheader("Over time: US holdings in one country")
+    st.subheader("Country detail: US holdings")
     who = st.selectbox("Country", abc, index=abc.index("Japan") if "Japan" in abc else 0, key="ab_who")
     c = ab[ab.holder == who]
     start = window("ab_pf", "5Y", c.date.min())
@@ -383,7 +385,7 @@ with tab_jp:
 
     section(2, "Foreign investors: who's buying and selling Japanese bonds")
     jb = df[df.market == "Japanese bonds by buyer"]
-    st.subheader("Ranking")
+    st.subheader("Net buyers and sellers by country")
     k = window_pick("jb_win")
     bm = sorted(jb.date.unique())[-k:]
     st.plotly_chart(buysell(jb[jb.date.isin(bm)].groupby("holder").amount.sum().sort_values(),
@@ -392,7 +394,7 @@ with tab_jp:
          f"(government and corporate) · country = where the other side of the trade sits, so financial hubs "
          f"(US, UK) include investors from elsewhere trading through New York and London · the United States bar "
          f"has run about 2x actual US buying (see Data checks)")
-    st.subheader("Over time")
+    st.subheader("History")
     view = st.segmented_control("View", ["By country (running total)", "All foreign investors (monthly)"],
                                 default="By country (running total)", key="jb_view",
                                 label_visibility="collapsed") or "By country (running total)"
@@ -429,7 +431,7 @@ with tab_jp:
         out_["holder"] = out_.holder.replace({"Other countries": "All other countries (not itemized)"})
     else:
         out_ = jp[jp.market == "Japanese investors abroad (all bonds)"]
-    st.subheader("Ranking: where Japanese investors are buying and selling bonds")
+    st.subheader("Net buying and selling by country")
     k = window_pick("jo_win")
     win = sorted(out_.date.unique())[-k:]
     st.plotly_chart(buysell(out_[out_.date.isin(win)].groupby("holder").amount.sum().sort_values(),
@@ -439,7 +441,7 @@ with tab_jp:
          + ("government bonds; Japan only itemizes 12 issuers, everything else is one 'other' bar · switch to "
             "All bonds to see which countries are likely inside it (Japan doesn't break it out)"
             if gov_only else "bonds of all kinds (government and corporate) by the issuer's country"))
-    st.subheader("Over time: running total by country")
+    st.subheader("Cumulative net buying by country")
     running_total(out_.pivot(index="date", columns="holder", values="amount"),
                   ["United States", "France", "United Kingdom", "Germany", "Italy"]
                   + ([] if gov_only else ["South Korea"]), "jo_" + ("g" if gov_only else "a"),
@@ -557,7 +559,7 @@ with tab_oth:
             "layer.")
 
     st.caption("To see how much of this lands in US markets, use United States tab → section 2 → "
-               "Over time: one country's US portfolio.")
+               "Country detail: holdings of US securities.")
 
 # ================================================================== HEDGE FUNDS
 TENORS = ["2-year", "5-year", "10-year", "Ultra 10-year", "Bond", "Ultra bond"]
@@ -575,7 +577,7 @@ with tab_hf:
             "at once, Treasury yields jump, and in 2020 the Fed had to step in.\n"
             "- So the size of their futures short, and whether it's shrinking, is a read on how fragile the "
             "Treasury market is.")
-    st.header("Treasury futures positioning")
+    st.header("Hedge fund Treasury futures positioning")
     c1, c2 = st.columns([1, 1])
     with c1:
         start = window("hf", "5Y", tot.index.min())
@@ -618,7 +620,7 @@ METRICS = {"Bid-to-cover": ("bid_to_cover", "x"),
            "Direct bidders, mostly US funds (%)": ("direct_pct", "%"),
            "High yield (%)": ("high_yield", "%"),
            "Size ($bn)": ("size_bn", "bn")}
-METRICS_J = {"Tail (bp)": ("tail_bp", "bp"), "Tail (yen)": ("tail_yen", "yen"), "Bid-to-cover": ("bid_to_cover", "x"),
+METRICS_J = {"Tail (bp)": ("tail_bp", "bp"), "Bid-to-cover": ("bid_to_cover", "x"),
              "Yield (%)": ("yield", "%"), "Size (¥bn)": ("size_bn_jpy", "bn")}
 FMT = {"x": (".2f", "x"), "%": (".2f", "%"), "bp": (".1f", "bp"), "bn": (",.0f", "bn"), "yen": (".2f", " yen")}
 
@@ -662,7 +664,7 @@ with tab_auc:
             "- **Indirect bidders**: bids placed through dealers, mostly foreign central banks and big asset "
             "managers. **Direct bidders**: bids placed straight with the Treasury, mostly US funds.\n"
             "- **Japan's tail** (Japan only, published by its Ministry of Finance): the gap between the average and "
-            "lowest accepted price. Smaller = stronger. Japan doesn't publish who bought.\n"
+            "lowest accepted yield, in basis points. Always zero or positive by construction, so smaller = stronger; Japan doesn't publish a when-issued comparison, so there's no stop-through. Japan doesn't publish who bought either.\n"
             "- Strong/weak is judged against the average of that maturity's previous 6 auctions.")
 
     if mkt == "US Treasuries":
@@ -766,7 +768,6 @@ with tab_auc:
                 rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}",
                               "Size (¥bn)": f"{last.size_bn_jpy:,.0f}", "Yield (%)": f"{last['yield']:.3f}",
                               "Tail (bp)": f"{last.tail_bp:.1f} ({tail_d:+.1f})" if has_tail else "n/a",
-                              "Tail (yen)": f"{last.tail_yen:.2f}" if has_tail else "n/a",
                               "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
                               "Read": verdict(min(score, 3))})
             st.table(pd.DataFrame(rows_).set_index("Maturity"))
@@ -784,7 +785,7 @@ with tab_auc:
             a = cut(a, window("jg_win", "5Y", a.index.min()))
             history_chart(a, col, unit, "jg_chart")
             asof(f"{len(a)} {tenor} JGB auctions in range · Japan Ministry of Finance · tail = gap between the "
-                 f"average and lowest accepted price, shown in bp of yield or in yen per ¥100")
+                 f"average and lowest accepted yield, in basis points")
 
 
 # ------------------------------------------------------------------ data checks
