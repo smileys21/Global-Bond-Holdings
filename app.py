@@ -597,18 +597,6 @@ with tab_hf:
     asof(f"As of {tot.index[-1]:%d %b %Y} · CFTC Traders in Financial Futures, weekly · face value of contracts · "
          f"{note}")
 
-    o = df[df.source.str.startswith("OFR")].pivot(index="date", columns="holder", values="amount")
-    if len(o) >= 2:
-        q, p = o.iloc[-1], o.iloc[-2]
-        record = " (a record)" if q["Repo borrowing"] >= o["Repo borrowing"].max() else ""
-        st.info(f"Hedge funds' own regulatory filings, quarter to {o.index[-1]:%d %b %Y}: long Treasury positions "
-                f"\\${q['Long Treasury exposure']:,.0f}bn ({q['Long Treasury exposure'] - p['Long Treasury exposure']:+,.0f}), "
-                f"short \\${q['Short Treasury exposure']:,.0f}bn ({q['Short Treasury exposure'] - p['Short Treasury exposure']:+,.0f}), "
-                f"repo borrowing \\${q['Repo borrowing']:,.0f}bn ({q['Repo borrowing'] - p['Repo borrowing']:+,.0f}){record}. "
-                f"A real unwind would show all three falling together. Source: Office of Financial Research, SEC "
-                f"Form PF, released about 2.5 months after quarter end.")
-
-
 
 # ================================================================== AUCTIONS
 AUCTIONS = Path(__file__).parent / "data" / "auctions.csv"
