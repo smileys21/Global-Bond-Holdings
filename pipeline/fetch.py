@@ -679,14 +679,6 @@ def main() -> int:
         print(f"ok   allotments: {len(al):,} rows")
     except Exception as e:
         print(f"FAIL allotments: {e}", file=sys.stderr)
-    if au is not None:
-        try:
-            from tails import update_tails
-            tl = update_tails(au)
-            print(f"ok   tails: {len(tl):,} rows ({(tl.source == 'Helious').sum()} reported, "
-                  f"{(tl.source == 'Estimate').sum()} estimated)")
-        except Exception as e:
-            print(f"FAIL tails: {e}", file=sys.stderr)
     return 1 if len(failed) == len(jobs) else 0
 
 
