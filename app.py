@@ -620,8 +620,7 @@ METRICS = {"Bid-to-cover": ("bid_to_cover", "x"),
            "Direct bidders, mostly US funds (%)": ("direct_pct", "%"),
            "High yield (%)": ("high_yield", "%"),
            "Size ($bn)": ("size_bn", "bn")}
-METRICS_J = {"Tail (bp)": ("tail_bp", "bp"), "Bid-to-cover": ("bid_to_cover", "x"),
-             "Yield (%)": ("yield", "%"), "Size (¥bn)": ("size_bn_jpy", "bn")}
+METRICS_J = {"Bid-to-cover": ("bid_to_cover", "x"), "Yield (%)": ("yield", "%"), "Size (¥bn)": ("size_bn_jpy", "bn")}
 FMT = {"x": (".2f", "x"), "%": (".2f", "%"), "bp": (".1f", "bp"), "bn": (",.0f", "bn"), "yen": (".2f", " yen")}
 
 
@@ -658,13 +657,12 @@ with tab_auc:
                                key="au_mkt", label_visibility="collapsed") or "US Treasuries"
     with st.expander("How to read auction results", expanded=False):
         st.markdown(
-            "- **Bid-to-cover**: dollars bid for every dollar sold. Higher = more demand.\n"
+            "- **Bid-to-cover**: amount bid for every unit sold. Higher = more demand.\n"
             "- **Dealer takedown**: share left with the primary dealers, the banks obliged to bid. They're the "
             "buyer of last resort, so a high share means end investors stepped back.\n"
             "- **Indirect bidders**: bids placed through dealers, mostly foreign central banks and big asset "
             "managers. **Direct bidders**: bids placed straight with the Treasury, mostly US funds.\n"
-            "- **Japan's tail** (Japan only, published by its Ministry of Finance): the gap between the average and "
-            "lowest accepted yield, in basis points. Always zero or positive by construction, so smaller = stronger; Japan doesn't publish a when-issued comparison, so there's no stop-through. Japan doesn't publish who bought either.\n"
+            "- **Japan** publishes size, yield and bid-to-cover but not who bought, so its table shows those only.\n"
             "- Strong/weak is judged against the average of that maturity's previous 6 auctions.")
 
     if mkt == "US Treasuries":
@@ -762,30 +760,23 @@ with tab_auc:
                     continue
                 last, prev = a.iloc[-1], a.iloc[-7:-1]
                 btc_d = last.bid_to_cover - prev.bid_to_cover.mean()
-                has_tail = pd.notna(last.tail_bp)
-                tail_d = last.tail_bp - prev.tail_bp.mean() if has_tail else float("nan")
-                score = int(btc_d > 0) + (int(tail_d < 0) * 2 if has_tail else int(btc_d > 0))
                 rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}",
                               "Size (¥bn)": f"{last.size_bn_jpy:,.0f}", "Yield (%)": f"{last['yield']:.3f}",
-                              "Tail (bp)": f"{last.tail_bp:.1f} ({tail_d:+.1f})" if has_tail else "n/a",
-                              "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
-                              "Read": verdict(min(score, 3))})
+                              "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})"})
             st.table(pd.DataFrame(rows_).set_index("Maturity"))
-            asof(f"Brackets = change vs the average of that maturity's previous 6 auctions · Read weighs the tail "
-                 f"(smaller = better, counts double) and bid-to-cover (higher = better) · the 40-year is sold on "
-                 f"yield, so it has no tail · Japan Ministry of Finance, file updated about monthly, latest auction "
+            asof(f"Brackets = change vs the average of that maturity's previous 6 auctions · yield = highest "
+                 f"accepted yield · Japan Ministry of Finance, file updated about monthly, latest auction "
                  f"{jg.date.max():%d %b %Y}")
 
             st.header("History by maturity")
             tenor = st.segmented_control("Maturity", TENORS_J, default="30-Year", key="jg_tenor") or "30-Year"
-            metric = st.segmented_control("Metric", list(METRICS_J), default="Tail (bp)", key="jg_metric") \
-                or "Tail (bp)"
+            metric = st.segmented_control("Metric", list(METRICS_J), default="Bid-to-cover", key="jg_metric") \
+                or "Bid-to-cover"
             col, unit = METRICS_J[metric]
             a = jg[jg.tenor == tenor].set_index("date").sort_index()
             a = cut(a, window("jg_win", "5Y", a.index.min()))
             history_chart(a, col, unit, "jg_chart")
-            asof(f"{len(a)} {tenor} JGB auctions in range · Japan Ministry of Finance · tail = gap between the "
-                 f"average and lowest accepted yield, in basis points")
+            asof(f"{len(a)} {tenor} JGB auctions in range · Japan Ministry of Finance")
 
 
 # ------------------------------------------------------------------ data checks

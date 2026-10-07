@@ -536,7 +536,7 @@ JGB_SHEETS = {"2年債": "2-Year", "5年債": "5-Year", "10年債": "10-Year", "
 
 
 def jgb_auctions() -> pd.DataFrame:
-    """Every 2- to 40-year JGB auction: size, bid-to-cover and the official tail (average minus lowest price)."""
+    """Every 2- to 40-year JGB auction: size, highest accepted yield and bid-to-cover."""
     r = requests.get(MOF_XLS, headers=UA, timeout=180)
     r.raise_for_status()
     xls = pd.ExcelFile(io.BytesIO(r.content))
@@ -560,10 +560,8 @@ def jgb_auctions() -> pd.DataFrame:
         })
         t = t.dropna(subset=["date", "accepted"])
         t["bid_to_cover"] = t["bids"] / t["accepted"]
-        t["tail_yen"] = t["avg_price"] - t["low_price"]
-        t["tail_bp"] = (t["low_yield"] - t["avg_yield"]) * 100
         t["yield"] = t["low_yield"].fillna(t["high_yield_40"])
-        out.append(t[["date", "tenor", "size_bn_jpy", "yield", "bid_to_cover", "tail_yen", "tail_bp"]])
+        out.append(t[["date", "tenor", "size_bn_jpy", "yield", "bid_to_cover"]])
     return pd.concat(out).sort_values("date")
 
 
