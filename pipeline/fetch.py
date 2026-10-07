@@ -283,6 +283,14 @@ JP_SOV_DEST = {"US": "United States", "CA": "Canada", "AU": "Australia", "DE": "
                "HK": "Hong Kong", "SE": "Sweden", "OT": "Other countries"}
 
 
+JP_ALLBOND_DEST = {"US": "United States", "CA": "Canada", "MX": "Mexico", "BR": "Brazil", "CI": "Cayman Islands",
+                   "GB": "United Kingdom", "FR": "France", "DE": "Germany", "IT": "Italy", "ES": "Spain",
+                   "NL": "Netherlands", "BE": "Belgium", "LX": "Luxembourg", "IE": "Ireland", "AT": "Austria",
+                   "FI": "Finland", "PT": "Portugal", "GR": "Greece", "CH": "Switzerland", "SE": "Sweden",
+                   "NO": "Norway", "DK": "Denmark", "AU": "Australia", "NZ": "New Zealand", "CN": "China",
+                   "HK": "Hong Kong", "TW": "Taiwan", "KR": "South Korea", "SG": "Singapore", "IN": "India",
+                   "ID": "Indonesia", "MY": "Malaysia", "TH": "Thailand", "PH": "Philippines",
+                   "SA": "Saudi Arabia", "AE": "UAE", "ZA": "South Africa", "II": "International organizations"}
 JP_BUYERS = {"US": "United States", "GB": "United Kingdom", "FR": "France", "DE": "Germany", "CH": "Switzerland",
              "NL": "Netherlands", "BE": "Belgium", "LX": "Luxembourg", "IE": "Ireland", "CI": "Cayman Islands",
              "CA": "Canada", "AU": "Australia", "HK": "Hong Kong", "SG": "Singapore", "CN": "China",
@@ -294,7 +302,7 @@ def japan_flows() -> list[pd.DataFrame]:
     """Monthly: Japanese investors' net purchases of long-term foreign government bonds by issuer country,
     and foreign investors' net purchases of long-term Japanese government bonds."""
     src = "BoJ balance of payments (monthly)"
-    codes = ([f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113", "BPBP6JYNFL221", "BPBP6JYNFA21", "BPBP6JYNFA221",
+    codes = ([f"BPPI6D3N9{c}" for c in JP_ALLBOND_DEST] + [f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113", "BPBP6JYNFL221", "BPBP6JYNFA21", "BPBP6JYNFA221",
              "BPBP6JYNFA222"] + [f"BPPI6E3N9{c}" for c in JP_BUYERS])
     d = boj("BP01", codes, "201401")
     d.index = [pd.Period(f"{i[:4]}-{i[4:]}", "M").end_time.normalize() for i in d.index]
@@ -308,6 +316,10 @@ def japan_flows() -> list[pd.DataFrame]:
                     "net purchases", src))
     out.append(rows(conv(d["BPBP6JYNFL22113"].dropna()), "Japanese government bonds", "Foreign",
                     "net purchases", src))
+    for c, name in JP_ALLBOND_DEST.items():
+        if f"BPPI6D3N9{c}" in d:
+            out.append(rows(conv(d[f"BPPI6D3N9{c}"].dropna()), "Japanese investors abroad (all bonds)", name,
+                            "net purchases", src))
     out.append(rows(conv(d["BPBP6JYNFL221"].dropna()), "Japanese bonds (all long-term)", "Foreign",
                     "net purchases", src))
     # all foreign securities bought by Japanese investors (negative = repatriation)
@@ -392,8 +404,9 @@ def euro_holders() -> list[pd.DataFrame]:
 
 
 # ------------------------------------------------------------------ IMF (foreign assets vs reserves)
-IIP_COUNTRIES = {"KOR": "South Korea", "JPN": "Japan", "CHN": "China", "CHE": "Switzerland", "NOR": "Norway",
-                 "IND": "India"}
+IIP_COUNTRIES = {"KOR": "South Korea", "JPN": "Japan", "CHN": "China", "TWN": "Taiwan", "IND": "India",
+                 "CHE": "Switzerland", "NOR": "Norway", "GBR": "United Kingdom", "DEU": "Germany", "FRA": "France",
+                 "ITA": "Italy", "ESP": "Spain", "NLD": "Netherlands"}
 IIP_SECTORS = {"S13": "Government (incl. state pension & wealth funds)", "S12R": "Insurers, pensions & funds",
                "S1V": "Households & companies", "S122": "Banks"}
 
@@ -416,7 +429,15 @@ def imf_iip() -> list[pd.DataFrame]:
         if txt is None:
             print(f"  IMF: skipped {name} this run", file=sys.stderr)
             continue
-        d = pd.read_csv(io.StringIO(txt), usecols=["INDICATOR", "TIME_PERIOD", "OBS_VALUE"])
+        try:
+            d = pd.read_csv(io.StringIO(txt), usecols=["INDICATOR", "TIME_PERIOD", "OBS_VALUE"])
+        except Exception:
+            print(f"  IMF: no data for {name}", file=sys.stderr)
+            continue
+        d = d[d["TIME_PERIOD"].astype(str).str.match(r"^\d{4}-Q[1-4]$")]
+        if d.empty:
+            print(f"  IMF: no quarterly data for {name}", file=sys.stderr)
+            continue
         d["date"] = [pd.Period(p, "Q").end_time.normalize() for p in d["TIME_PERIOD"]]
         w = d.pivot_table(index="date", columns="INDICATOR", values="OBS_VALUE") / 1e9  # USD -> bn
         if "R" in w:

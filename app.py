@@ -344,7 +344,7 @@ with tab_us:
     asof(f"As of {ab.date.max():%b %Y} · US Treasury TIC, monthly · long-term securities only · stocks bought on a "
          f"London or Dublin listing may show up under those countries")
 
-    section(4, "Central banks: foreign official vs private holders")
+    section(4, "Central banks: who abroad holds US Treasuries")
     fo = series("US Treasuries", "Foreign official (all)", TIC3)
     cust = series("US Treasuries", "Foreign central banks (Fed custody)", "H.4.1")
     cust_m = cust.resample("ME").last()
@@ -359,7 +359,8 @@ with tab_us:
     st.plotly_chart(style(fig, 400), width="stretch")
     asof(f"Monthly through {stack.index[-1]:%b %Y} · the three layers add up to total foreign holdings · latest "
          f"weekly custody reading ${cust.iloc[-1]:,.0f}bn on {cust.index[-1]:%d %b %Y}")
-    st.caption("Official = foreign central banks and governments. Private = everyone else abroad (banks, funds, "
+    st.caption("Covers all US Treasuries held abroad: bills, notes and bonds. "
+               "Official = foreign central banks and governments. Private = everyone else abroad (banks, funds, "
                "insurers, hedge funds). Central banks keep most of their Treasuries at the New York Fed, which "
                "reports weekly, so a drop there is the earliest sign of central bank selling.")
 
@@ -405,18 +406,32 @@ with tab_jp:
     not_published("Japan does not publish foreign holdings of its bonds by country.")
 
     section(3, "Japanese investors abroad")
-    out_ = jp[(jp.market == "Japanese investors abroad") & (jp.holder != "All countries")]
-    st.subheader("Ranking: which countries' government bonds Japan is buying and selling")
+    st.info("These are Japanese private investors and pension funds. The Ministry of Finance's intervention "
+            "selling (mostly US Treasury bills) is not included here; it shows in section 4 and in the United "
+            "States tab, section 2.")
+    scope = st.segmented_control("Bonds", ["Government bonds (12 countries itemized)", "All bonds (38 countries)"],
+                                 default="Government bonds (12 countries itemized)", key="jo_scope",
+                                 label_visibility="collapsed") or "Government bonds (12 countries itemized)"
+    gov_only = scope.startswith("Government")
+    if gov_only:
+        out_ = jp[(jp.market == "Japanese investors abroad") & (jp.holder != "All countries")].copy()
+        out_["holder"] = out_.holder.replace({"Other countries": "All other countries (not itemized)"})
+    else:
+        out_ = jp[jp.market == "Japanese investors abroad (all bonds)"]
+    st.subheader("Ranking: where Japanese investors are buying and selling bonds")
     k = window_pick("jo_win")
     win = sorted(out_.date.unique())[-k:]
     st.plotly_chart(buysell(out_[out_.date.isin(win)].groupby("holder").amount.sum().sort_values()), width="stretch")
-    asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · Japanese investors (not "
-         f"the government's reserves) buying long-term government bonds issued by each country")
+    asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · long-term "
+         + ("government bonds; Japan only itemizes 12 issuers, everything else is one 'other' bar · switch to "
+            "All bonds to see what's inside it (lately mostly South Korea)"
+            if gov_only else "bonds of all kinds (government and corporate) by the issuer's country"))
     st.subheader("Over time: running total by country")
     running_total(out_.pivot(index="date", columns="holder", values="amount"),
-                  ["United States", "France", "United Kingdom", "Germany", "Italy"], "jo",
-                  "Running total of Japanese investors' net purchases of each country's government bonds · "
-                  "a falling line = steady selling")
+                  ["United States", "France", "United Kingdom", "Germany", "Italy"]
+                  + ([] if gov_only else ["South Korea"]), "jo_" + ("g" if gov_only else "a"),
+                  "Running total of Japanese investors' net purchases by issuing country · a falling line = "
+                  "steady selling")
 
     st.subheader("Repatriation: are Japanese investors bringing money home?")
     ja = df[df.market == "Japanese investors abroad (all securities)"].pivot(
@@ -524,25 +539,27 @@ with tab_oth:
             "which keeps money flowing out and the currency weaker than its trade surplus alone would suggest.\n"
             "- Values are at market prices, so stock market moves change the size too. For Korea, the government "
             "layer is mostly the National Pension Service and the Korea Investment Corporation.\n"
-            "- China and Switzerland don't say who holds their foreign portfolio, so it shows as one layer.")
+            "- China, Switzerland and the UK don't say who holds their foreign portfolio, so it shows as one "
+            "layer.")
 
-    st.subheader(f"What {who} holds in the US")
-    tic_name = {"South Korea": "Korea, South", "China": "China, Mainland"}.get(who, who)
-    us_portfolio(tic_name, "oth")
+    st.caption("To see how much of this lands in US markets, use United States tab → section 2 → "
+               "Over time: one country's US portfolio.")
 
 # ================================================================== HEDGE FUNDS
 TENORS = ["2-year", "5-year", "10-year", "Ultra 10-year", "Bond", "Ultra bond"]
 with tab_hf:
+    fut = df[df.source.str.startswith("CFTC")]
+    tot = fut.groupby(["date", "holder"]).amount.sum().unstack()
+    hf_short = -tot["Leveraged funds"].iloc[-1]
     with st.expander("Why this matters", expanded=True):
         st.markdown(
-            "- Hedge funds run a roughly \\$1tn trade called the **basis trade**: they buy Treasury bonds with "
-            "borrowed money and sell Treasury futures against them, pocketing the small price gap between the two.\n"
+            "- Hedge funds run a trade called the **basis trade**: they buy Treasury bonds with borrowed money and "
+            "sell Treasury futures against them, pocketing the small price gap between the two. Their net futures "
+            f"short, a rough gauge of its size, is \\${hf_short:,.0f}bn as of {tot.index[-1]:%d %b %Y}.\n"
             "- It's very leveraged. When it unwinds in a hurry (March 2020, April 2025), hedge funds dump bonds all "
             "at once, Treasury yields jump, and in 2020 the Fed had to step in.\n"
             "- So the size of their futures short, and whether it's shrinking, is a read on how fragile the "
             "Treasury market is.")
-    fut = df[df.source.str.startswith("CFTC")]
-    tot = fut.groupby(["date", "holder"]).amount.sum().unstack()
     st.header("Treasury futures positioning")
     c1, c2 = st.columns([1, 1])
     with c1:
