@@ -567,6 +567,42 @@ def jgb_auctions() -> pd.DataFrame:
     return pd.concat(out).sort_values("date")
 
 
+# ------------------------------------------------------------------ Treasury investor-class allotments
+ALLOT_OUT = ROOT / "data" / "allotments.csv"
+ALLOT_PAGE = "https://home.treasury.gov/data/investor-class-auction-allotments"
+ALLOT_GROUPS = {"Depository institutions": "Banks", "Individuals": "Individuals", "Dealers and brokers": "Dealers",
+                "Pension and Retirement funds and Ins. Co.": "Pensions & insurers", "Investment funds": "Investment funds",
+                "Foreign and international": "Foreign", "Other": "Other"}
+
+
+def allotments() -> pd.DataFrame:
+    """Who received each coupon auction (Treasury's investor-class allotments), October 2009 onward."""
+    page = get(ALLOT_PAGE)
+    link = re.search(r'href="?(/system/files/276/[^" >]*IC-Coupons\.xls)', page).group(1)
+    r = requests.get("https://home.treasury.gov" + link, headers=UA, timeout=180)
+    r.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(r.content), header=None)
+    hdr = next(i for i in range(10) if "Cusip" in [str(v).strip() for v in raw.iloc[i]])
+    cols = [re.sub(r"\s+", " ", str(v)).strip() for v in raw.iloc[hdr]]
+    d = raw.iloc[hdr + 1:].copy()
+    d.columns = cols
+    d = d[pd.to_datetime(d[cols[0]], errors="coerce").notna()]
+    sec = d["Security type"].astype(str)
+    d = d[~sec.str.contains("TIPS|FRN|Floating", case=False)]
+    num = lambda c: pd.to_numeric(d[c], errors="coerce")  # noqa: E731
+    out = pd.DataFrame({"issue_date": pd.to_datetime(d[cols[0]]),
+                        "tenor": d["Security type"].str.extract(r"(\d+-Year)")[0], "cusip": d["Cusip"]})
+    soma = num(next(c for c in cols if "SOMA" in c))
+    total = num(next(c for c in cols if c.startswith("Total"))) - soma.fillna(0)
+    for c in cols:
+        key = next((k for k in ALLOT_GROUPS if c.replace(" ", "").lower().startswith(k.replace(" ", "").lower()[:12])),
+                   None)
+        if key:
+            out[ALLOT_GROUPS[key]] = num(c) / total * 100
+    out["public_size_bn"] = total
+    return out.dropna(subset=["tenor"]).sort_values("issue_date")
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
     jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC (": tic, "CFTC": cftc,
@@ -606,6 +642,12 @@ def main() -> int:
         print(f"ok   JGB auctions: {len(jg):,} rows")
     except Exception as e:
         print(f"FAIL JGB auctions: {e}", file=sys.stderr)
+    try:
+        al = allotments()
+        al.to_csv(ALLOT_OUT, index=False, date_format="%Y-%m-%d")
+        print(f"ok   allotments: {len(al):,} rows")
+    except Exception as e:
+        print(f"FAIL allotments: {e}", file=sys.stderr)
     if au is not None:
         try:
             from tails import update_tails

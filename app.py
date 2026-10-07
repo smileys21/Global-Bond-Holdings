@@ -383,7 +383,8 @@ with tab_jp:
                             pin=("United States",)), width="stretch")
     asof(f"Net purchases {pd.Timestamp(bm[0]):%b %Y} to {pd.Timestamp(bm[-1]):%b %Y} · all Japanese long-term bonds "
          f"(government and corporate) · country = where the other side of the trade sits, so financial hubs "
-         f"(US, UK) include investors from elsewhere trading through New York and London")
+         f"(US, UK) include investors from elsewhere trading through New York and London · the United States bar "
+         f"has run about 2x actual US buying (see Data checks)")
     st.subheader("Over time")
     view = st.segmented_control("View", ["By country (running total)", "All foreign investors (monthly)"],
                                 default="By country (running total)", key="jb_view",
@@ -552,6 +553,7 @@ with tab_oth:
 
 # ================================================================== HEDGE FUNDS
 TENORS = ["2-year", "5-year", "10-year", "Ultra 10-year", "Bond", "Ultra bond"]
+TENOR_LABELS = {"Ultra 10-year": "Ultra 10-year (~10Y)", "Bond": "Bond (15–25Y)", "Ultra bond": "Ultra bond (25–30Y)"}
 with tab_hf:
     fut = df[df.source.str.startswith("CFTC")]
     tot = fut.groupby(["date", "holder"]).amount.sum().unstack()
@@ -577,7 +579,7 @@ with tab_hf:
     if hview == "Hedge funds by maturity":
         lev = fut[fut.holder == "Leveraged funds"].pivot(index="date", columns="market", values="amount")
         lev.columns = [c.replace("UST futures ", "") for c in lev.columns]
-        lv = cut(lev[[t for t in TENORS if t in lev.columns]], start)
+        lv = cut(lev[[t for t in TENORS if t in lev.columns]], start).rename(columns=TENOR_LABELS)
         for i, t in enumerate(lv.columns):
             fig.add_trace(go.Bar(x=lv.index, y=lv[t], name=t, marker=dict(color=SERIES[i], line=dict(width=0)),
                                  hovertemplate="%{y:$,.0f}bn"))
@@ -612,6 +614,7 @@ with tab_hf:
 AUCTIONS = Path(__file__).parent / "data" / "auctions.csv"
 TAILS = Path(__file__).parent / "data" / "tails.csv"
 JGB_AUCTIONS = Path(__file__).parent / "data" / "jgb_auctions.csv"
+ALLOT = Path(__file__).parent / "data" / "allotments.csv"
 TENORS_A = ["2-Year", "3-Year", "5-Year", "7-Year", "10-Year", "20-Year", "30-Year"]
 TENORS_J = ["2-Year", "5-Year", "10-Year", "20-Year", "30-Year", "40-Year"]
 METRICS = {"Tail (bp)": ("tail_bp", "bp"),
@@ -628,7 +631,9 @@ FMT = {"x": (".2f", "x"), "%": (".2f", "%"), "bp": (".1f", "bp"), "bn": (",.0f",
 
 @st.cache_data(ttl=3600)
 def load_csv(path: str, version: float) -> pd.DataFrame:
-    return pd.read_csv(path, parse_dates=["date"])
+    d = pd.read_csv(path)
+    d["date"] = pd.to_datetime(d["date"] if "date" in d else d["issue_date"])
+    return d
 
 
 def history_chart(a: pd.DataFrame, col: str, unit: str, key: str, label_col: str | None = None) -> None:
@@ -737,17 +742,46 @@ with tab_auc:
             else:
                 asof(f"{len(a)} {tenor} auctions in range, new issues and reopenings · TreasuryDirect")
 
-            st.header("Demand mix over time")
-            a2 = cut(au[au.tenor == tenor].set_index("date").sort_index(), window("au_mix", "5Y"))
+            st.header("Who bought")
+            mix = st.segmented_control("View", ["By bidder type (auction day)", "By investor type (allotments)"],
+                                       default="By bidder type (auction day)", key="au_mixview",
+                                       label_visibility="collapsed") or "By bidder type (auction day)"
+            start = window("au_mix", "5Y")
             fig = go.Figure()
-            for i, (c, n) in enumerate([("indirect_pct", "Indirect (mostly foreign)"),
-                                        ("direct_pct", "Direct (mostly US funds)"), ("dealer_pct", "Dealers (left over)")]):
-                fig.add_trace(go.Bar(x=a2.index, y=a2[c], name=n,
-                                     marker=dict(color=SERIES[[0, 2, 7][i]], line=dict(width=0)),
-                                     hovertemplate="%{y:.1f}%"))
+            if mix.startswith("By bidder"):
+                a2 = cut(au[au.tenor == tenor].set_index("date").sort_index(), start)
+                for i, (c, n) in enumerate([("indirect_pct", "Indirect (via dealers: foreign, big funds)"),
+                                            ("direct_pct", "Direct (straight to Treasury)"),
+                                            ("dealer_pct", "Dealers (left over)")]):
+                    fig.add_trace(go.Bar(x=a2.index, y=a2[c], name=n,
+                                         marker=dict(color=SERIES[[0, 2, 7][i]], line=dict(width=0)),
+                                         hovertemplate="%{y:.1f}%"))
+                note = (f"Share of the competitive auction won through each bidding channel, {tenor} · published the "
+                        f"day of the auction · TreasuryDirect")
+            else:
+                al = load_csv(str(ALLOT), ALLOT.stat().st_mtime) if ALLOT.exists() else None
+                if al is None:
+                    st.warning("Allotment data arrives with the next daily refresh.")
+                    note = ""
+                else:
+                    a3 = cut(al[al.tenor == tenor].set_index("date").sort_index(), start)
+                    groups = ["Investment funds", "Foreign", "Pensions & insurers", "Banks", "Individuals", "Dealers",
+                              "Other"]
+                    colors = [SERIES[2], SERIES[0], SERIES[6], SERIES[5], SERIES[4], SERIES[7], OTHER]
+                    for g, c in zip(groups, colors):
+                        fig.add_trace(go.Bar(x=a3.index, y=a3[g], name=g, marker=dict(color=c, line=dict(width=0)),
+                                             hovertemplate="%{y:.1f}%"))
+                    note = (f"Share of each {tenor} auction allotted to each investor type, excluding the Fed's own "
+                            f"add-on purchases · dated by issue date, published about twice a month · Treasury "
+                            f"investor-class allotments, October 2009 onward")
             fig.update_layout(barmode="stack", bargap=0.15)
-            st.plotly_chart(style(fig, 360, ".0f", "%"), width="stretch", key="au_mixchart")
-            asof(f"Share of the competitive auction taken by each group, {tenor} · TreasuryDirect")
+            st.plotly_chart(style(fig, 380, ".0f", "%"), width="stretch", key="au_mixchart")
+            if note:
+                asof(note)
+            st.caption("The two views cut the same auctions differently. Bidder type is how bids came in: "
+                       "'indirect' bids go through a dealer and mostly come from foreign central banks and large "
+                       "asset managers, so indirect roughly equals Foreign + Investment funds. Investor type is who "
+                       "actually ended up owning the bonds, with funds, foreign buyers, pensions and banks split out.")
 
     else:
         if not JGB_AUCTIONS.exists():
@@ -909,7 +943,8 @@ with tab_src:
     fresh = (df.groupby("source").date.max().rename("Latest data").dt.strftime("%d %b %Y").to_frame())
     for name, path in [("TreasuryDirect auction results (per auction)", AUCTIONS),
                        ("Japan Ministry of Finance JGB auction results", JGB_AUCTIONS),
-                       ("Auction tails: Helious (reported) + FedInvest (estimated)", TAILS)]:
+                       ("Auction tails: Helious (reported) + FedInvest (estimated)", TAILS),
+                       ("Treasury investor-class allotments", ALLOT)]:
         if path.exists():
             fresh.loc[name, "Latest data"] = f"{load_csv(str(path), path.stat().st_mtime).date.max():%d %b %Y}"
     fresh["Link"] = fresh.index.map({
@@ -928,6 +963,7 @@ with tab_src:
         "TreasuryDirect auction results (per auction)": "https://www.treasurydirect.gov/auctions/auction-query/",
         "Japan Ministry of Finance JGB auction results": "https://www.mof.go.jp/english/policy/jgbs/auction/past_auction_results/index.html",
         "Auction tails: Helious (reported) + FedInvest (estimated)": "https://helious.io/auctions",
+        "Treasury investor-class allotments": "https://home.treasury.gov/data/investor-class-auction-allotments",
     })
     st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
     st.caption("Data refreshes daily via GitHub Actions; each source keeps its last good copy if a download fails.")
