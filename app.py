@@ -613,8 +613,8 @@ JGB_AUCTIONS = Path(__file__).parent / "data" / "jgb_auctions.csv"
 ALLOT = Path(__file__).parent / "data" / "allotments.csv"
 TENORS_A = ["2-Year", "3-Year", "5-Year", "7-Year", "10-Year", "20-Year", "30-Year"]
 TENORS_J = ["2-Year", "5-Year", "10-Year", "20-Year", "30-Year", "40-Year"]
-METRICS = {"Tail (bp)": ("tail_bp", "bp"),
-           "Bid-to-cover": ("bid_to_cover", "x"),
+METRICS = {"Bid-to-cover": ("bid_to_cover", "x"),
+           "Tail (bp)": ("tail_bp", "bp"),
            "Dealer takedown (%)": ("dealer_pct", "%"),
            "Indirect bidders, mostly foreign (%)": ("indirect_pct", "%"),
            "Direct bidders, mostly US funds (%)": ("direct_pct", "%"),
@@ -635,8 +635,7 @@ def load_csv(path: str, version: float) -> pd.DataFrame:
 def history_chart(a: pd.DataFrame, col: str, unit: str, key: str, label_col: str | None = None) -> None:
     fig = go.Figure()
     if col == "tail_bp" and "tail_src" in a:
-        for i, (src, name) in enumerate([("Helious", "Reported tail (Helious)"),
-                                         ("Estimate", "Estimated tail (reopenings)")]):
+        for i, (src, name) in enumerate([("Helious", "Reported tail (Helious)")]):
             s = a[a.tail_src == src]
             fig.add_trace(go.Scatter(x=s.index, y=s[col], name=name, mode="markers",
                                      marker=dict(size=8, color=SERIES[0] if i == 0 else SERIES[1],
@@ -687,8 +686,7 @@ with tab_auc:
             if TAILS.exists():
                 tl = load_csv(str(TAILS), TAILS.stat().st_mtime)
                 tl["dkey"] = tl.date.dt.strftime("%Y-%m-%d")
-                tl["rank"] = tl.source.map({"Helious": 0, "Estimate": 1})
-                tl = tl.sort_values("rank").drop_duplicates(["dkey", "tenor"])  # reported beats estimated
+                tl = tl[tl.source == "Helious"].drop_duplicates(["dkey", "tenor"])
                 au = au.merge(tl[["dkey", "tenor", "tail_bp", "source"]].rename(columns={"source": "tail_src"}),
                               on=["dkey", "tenor"], how="left")
             else:
@@ -705,7 +703,7 @@ with tab_auc:
                 dlr_d = last.dealer_pct - prev.dealer_pct.mean()
                 ind_d = last.indirect_pct - prev.indirect_pct.mean()
                 tail = ("n/a" if pd.isna(last.tail_bp) else
-                        f"{'≈' if last.tail_src == 'Estimate' else ''}{last.tail_bp:+.1f}")
+                        f"{last.tail_bp:+.1f}")
                 score = int(btc_d > 0) + int(dlr_d < 0) + int(ind_d > 0)
                 rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}",
                               "Type": "Reopening" if last.reopening else "New",
@@ -718,13 +716,13 @@ with tab_auc:
             st.table(pd.DataFrame(rows_).set_index("Maturity"))
             asof("Brackets = change vs the average of that maturity's previous 6 auctions · Read counts how many of "
                  "bid-to-cover (up), dealers (down) and indirect (up) beat that average · Tail: positive = tailed "
-                 "(weak), negative = stopped through (strong); reported by Helious from July 2026, ≈ = our estimate "
-                 "for reopenings · TreasuryDirect auction results")
+                 "(weak), negative = stopped through (strong); reported by Helious, available from July 2026 · "
+                 "TreasuryDirect auction results")
 
             st.header("History by maturity")
             tenor = st.segmented_control("Maturity", TENORS_A, default="10-Year", key="au_tenor") or "10-Year"
-            metric = st.segmented_control("Metric", list(METRICS), default="Tail (bp)", key="au_metric") \
-                or "Tail (bp)"
+            metric = st.segmented_control("Metric", list(METRICS), default="Bid-to-cover", key="au_metric") \
+                or "Bid-to-cover"
             col, unit = METRICS[metric]
             a = au[au.tenor == tenor].set_index("date").sort_index()
             if col == "tail_bp":
@@ -732,12 +730,9 @@ with tab_auc:
             a = cut(a, window("au_win", "5Y", a.index.min()))
             history_chart(a, col, unit, "au_chart", "term")
             if col == "tail_bp":
-                asof("Reported tails (circles) cover every auction from July 2026. Estimated tails (diamonds) cover "
-                     "reopenings back to 2010: the market yield of the same bond from Treasury's FedInvest daytime "
-                     "price on auction day, which matched reported tails within about 0.5bp on average. Estimates get "
-                     "noisier on days with big market moves (inflation data, March 2020), when prices can shift "
-                     "between Treasury's price snapshot and the 1pm deadline. New-issue tails before July 2026 can't "
-                     "be estimated reliably from free data, so they're left blank.")
+                asof("Tails as reported by Helious (helious.io), which began recording them in July 2026; each new "
+                     "auction is added by the daily refresh. Positive = tailed (weak), negative = stopped through "
+                     "(strong).")
             else:
                 asof(f"{len(a)} {tenor} auctions in range, new issues and reopenings · TreasuryDirect")
 
@@ -774,7 +769,7 @@ with tab_auc:
                                              hovertemplate="%{y:.1f}%"))
                     note = (f"Share of each {tenor} auction allotted to each investor type, excluding the Fed's own "
                             f"add-on purchases · dated by issue date, published about twice a month · Treasury "
-                            f"investor-class allotments, October 2009 onward")
+                            f"investor-class allotments, January 2000 onward")
             fig.update_layout(barmode="stack", bargap=0.15)
             st.plotly_chart(style(fig, 380, ".0f", "%"), width="stretch", key="au_mixchart")
             if note:
@@ -945,7 +940,7 @@ with tab_src:
     fresh = (df.groupby("source").date.max().rename("Latest data").dt.strftime("%d %b %Y").to_frame())
     for name, path in [("TreasuryDirect auction results (per auction)", AUCTIONS),
                        ("Japan Ministry of Finance JGB auction results", JGB_AUCTIONS),
-                       ("Auction tails: Helious (reported) + FedInvest (estimated)", TAILS),
+                       ("Auction tails: Helious (reported)", TAILS),
                        ("Treasury investor-class allotments", ALLOT)]:
         if path.exists():
             fresh.loc[name, "Latest data"] = f"{load_csv(str(path), path.stat().st_mtime).date.max():%d %b %Y}"
@@ -964,7 +959,7 @@ with tab_src:
         "OFR Hedge Fund Monitor, SEC Form PF (quarterly)": "https://www.financialresearch.gov/hedge-fund-monitor/",
         "TreasuryDirect auction results (per auction)": "https://www.treasurydirect.gov/auctions/auction-query/",
         "Japan Ministry of Finance JGB auction results": "https://www.mof.go.jp/english/policy/jgbs/auction/past_auction_results/index.html",
-        "Auction tails: Helious (reported) + FedInvest (estimated)": "https://helious.io/auctions",
+        "Auction tails: Helious (reported)": "https://helious.io/auctions",
         "Treasury investor-class allotments": "https://home.treasury.gov/data/investor-class-auction-allotments",
     })
     st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})

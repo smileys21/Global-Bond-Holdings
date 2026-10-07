@@ -575,8 +575,33 @@ ALLOT_GROUPS = {"Depository institutions": "Banks", "Individuals": "Individuals"
                 "Foreign and international": "Foreign", "Other": "Other"}
 
 
+ALLOT_OLD = "https://home.treasury.gov/system/files/276/Website-PDO-4-A-Coupons-Jan-2000-Sep%202009.xls"
+
+
+def allotments_2000_2009() -> pd.DataFrame:
+    """Treasury's historical allotment table (January 2000 to September 2009), older layout, $ millions."""
+    r = requests.get(ALLOT_OLD, headers=UA, timeout=180)
+    r.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(r.content), header=None)
+    hdr = next(i for i in range(10) if str(raw.iloc[i, 0]).strip().startswith("Issue"))
+    d = raw.iloc[hdr + 1:, :15].copy()
+    d.columns = ["issue_date", "type", "term", "coupon", "cusip", "maturity", "total", "soma", "banks", "individuals",
+                 "dealers", "pensions", "funds", "foreign", "other"]
+    d = d[pd.to_datetime(d["issue_date"], errors="coerce").notna() & d["type"].isin(["NOTE", "BOND"])]
+    num = lambda c: pd.to_numeric(d[c], errors="coerce")  # noqa: E731
+    total = num("total") - num("soma").fillna(0)
+    out = pd.DataFrame({"issue_date": pd.to_datetime(d["issue_date"]),
+                        "tenor": d["term"].str.extract(r"(\d+)")[0] + "-Year", "cusip": d["cusip"]})
+    for c, name in [("banks", "Banks"), ("individuals", "Individuals"), ("dealers", "Dealers"),
+                    ("pensions", "Pensions & insurers"), ("funds", "Investment funds"), ("foreign", "Foreign"),
+                    ("other", "Other")]:
+        out[name] = num(c) / total * 100
+    out["public_size_bn"] = total / 1e3
+    return out.dropna(subset=["tenor"])
+
+
 def allotments() -> pd.DataFrame:
-    """Who received each coupon auction (Treasury's investor-class allotments), October 2009 onward."""
+    """Who received each coupon auction (Treasury's investor-class allotments), January 2000 onward."""
     page = get(ALLOT_PAGE)
     link = re.search(r'href="?(/system/files/276/[^" >]*IC-Coupons\.xls)', page).group(1)
     r = requests.get("https://home.treasury.gov" + link, headers=UA, timeout=180)
@@ -600,7 +625,13 @@ def allotments() -> pd.DataFrame:
         if key:
             out[ALLOT_GROUPS[key]] = num(c) / total * 100
     out["public_size_bn"] = total
-    return out.dropna(subset=["tenor"]).sort_values("issue_date")
+    out = out.dropna(subset=["tenor"])
+    try:
+        old = allotments_2000_2009()
+        out = pd.concat([old[old.issue_date < out.issue_date.min()], out])
+    except Exception as e:
+        print(f"  allotments: 2000-2009 history unavailable ({e})", file=sys.stderr)
+    return out.sort_values("issue_date")
 
 
 # ------------------------------------------------------------------ main

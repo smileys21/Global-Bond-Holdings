@@ -103,11 +103,12 @@ def helious_recent() -> list[tuple]:
     return rows
 
 
-def update_tails(au: pd.DataFrame, max_new_estimates: int = 600) -> pd.DataFrame:
-    """au = auctions table (date, tenor, cusip, reopening, high_yield)."""
+def update_tails(au: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Append any newly reported Helious tails. (Reopening estimates from FedInvest were dropped; the
+    functions above are kept in case they're wanted again.)"""
     cols = ["date", "tenor", "tail_bp", "source"]
     old = pd.read_csv(TAILS_OUT, dtype={"date": str}) if TAILS_OUT.exists() else pd.DataFrame(columns=cols)
-    rows = old.to_dict("records")
+    rows = [r for r in old.to_dict("records") if r["source"] == "Helious"]  # reported tails only
     have = {(r["tenor"], r["date"], r["source"]) for r in rows}
 
     reported = list(SEED)
@@ -120,26 +121,6 @@ def update_tails(au: pd.DataFrame, max_new_estimates: int = 600) -> pd.DataFrame
             rows.append(dict(date=day, tenor=tenor, tail_bp=tail, source="Helious"))
             have.add((tenor, day, "Helious"))
 
-    todo = au[au.reopening & (au.date >= "2010-01-01")].copy()
-    todo["day"] = todo.date.dt.strftime("%Y-%m-%d")
-    todo = todo[[(t, d, "Estimate") not in have for t, d in zip(todo.tenor, todo.day)]]
-    done = 0
-    for day, grp in todo.groupby("day"):
-        if done >= max_new_estimates:
-            break
-        try:
-            prices = fedinvest_prices(day)
-        except Exception as e:
-            print(f"  tails: FedInvest {day} failed ({e})", file=sys.stderr)
-            continue
-        for _, a in grp.iterrows():
-            est = estimate_reopening(day, a.cusip, a.high_yield, prices)
-            if est is not None:
-                rows.append(dict(date=day, tenor=a.tenor, tail_bp=est, source="Estimate"))
-        done += 1
-        if done % 20 == 0:  # save progress so a long backfill never loses work
-            pd.DataFrame(rows, columns=cols).sort_values(["date", "tenor", "source"]).to_csv(TAILS_OUT, index=False)
-        time.sleep(0.5)
     out = pd.DataFrame(rows, columns=cols).sort_values(["date", "tenor", "source"])
     out.to_csv(TAILS_OUT, index=False)
     return out
