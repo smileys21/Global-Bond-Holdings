@@ -1,4 +1,4 @@
-# Global Bond Tool
+# Global Bond Holdings
 
 Streamlit dashboard of who owns, buys and sells government bonds, plus US Treasury basis-trade positioning and US and Japanese auction results. All figures in US dollars unless labelled.
 

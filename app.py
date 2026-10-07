@@ -1,4 +1,4 @@
-"""Global Bond Tool — who owns, buys and sells government bonds."""
+"""Global Bond Holdings — who owns, buys and sells government bonds."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Global Bond Tool", layout="wide")
+st.set_page_config(page_title="Global Bond Holdings", layout="wide")
 
 DATA = Path(__file__).parent / "data" / "holdings.csv"
 
@@ -99,7 +99,7 @@ def cut(s, start):
 
 
 # ------------------------------------------------------------------ header
-st.title("Global Bond Tool")
+st.title("Global Bond Holdings")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
 tab_us, tab_jp, tab_oth, tab_hf, tab_auc, tab_chk, tab_src = st.tabs(
