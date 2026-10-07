@@ -80,8 +80,15 @@ def buysell(net: pd.Series, pin: tuple = ()) -> go.Figure:
 RANGES = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "20Y": 20, "All": None}
 
 
-def window(key: str, default: str = "5Y") -> pd.Timestamp | None:
-    pick = st.segmented_control("Range", list(RANGES), default=default, key=key,
+def window(key: str, default: str = "5Y", since=None) -> pd.Timestamp | None:
+    """Time-range buttons. Only offers ranges shorter than the data actually available (plus All)."""
+    opts = list(RANGES)
+    if since is not None and pd.notna(since):
+        span = (pd.Timestamp.today() - pd.Timestamp(since)).days / 365.25
+        opts = [r for r in RANGES if RANGES[r] is None or RANGES[r] < span]
+    if default not in opts:
+        default = "All"
+    pick = st.segmented_control("Range", opts, default=default, key=key,
                                 label_visibility="collapsed") or default
     yrs = RANGES[pick]
     return None if yrs is None else pd.Timestamp.today() - pd.DateOffset(years=yrs)
@@ -96,7 +103,7 @@ st.title("Global Bond Tool")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
 tab_us, tab_jp, tab_oth, tab_hf, tab_auc, tab_chk, tab_src = st.tabs(
-    ["United States", "Japan", "Other countries", "Hedge funds (US Treasuries)", "Auctions",
+    ["United States", "Japan", "Other countries", "Basis trade (US Treasuries)", "Auctions",
      "Data checks", "Sources"])
 
 # ------------------------------------------------------------------ shared pieces
@@ -157,7 +164,7 @@ def ownership(market: str, key: str) -> None:
     z = holders(market)
     c1, c2 = st.columns([3, 1])
     with c1:
-        start = window(f"{key}_own", "10Y")
+        start = window(f"{key}_own", "10Y", z.index.min())
     with c2:
         mode = st.segmented_control("Show", ["$ value", "% share"], default="% share", key=f"{key}_ownmode",
                                     label_visibility="collapsed") or "% share"
@@ -198,7 +205,7 @@ def ownership(market: str, key: str) -> None:
 def running_total(wide: pd.DataFrame, default: list, key: str, note: str) -> None:
     pick = st.multiselect("Countries", sorted(wide.columns), default=[c for c in default if c in wide.columns],
                           max_selections=8, key=f"{key}_pick", label_visibility="collapsed")
-    start = window(f"{key}_rt", "3Y")
+    start = window(f"{key}_rt", "3Y", wide.index.min())
     fig = go.Figure()
     for i, c in enumerate(pick):
         line(fig, cut(wide[c].fillna(0), start).cumsum(), c, SERIES[i])
@@ -228,7 +235,7 @@ def us_portfolio(who: str, key: str) -> None:
     if lt.empty:
         not_published(f"no US securities data for {who}.")
         return
-    start = window(f"{key}_pf", "5Y")
+    start = window(f"{key}_pf", "5Y", lt.date.min())
     h = cut(lt[lt.measure == "holdings"].pivot(index="date", columns="market", values="amount")[PORTFOLIO], start)
     n_ = cut(lt[lt.measure == "net purchases"].pivot(index="date", columns="market", values="amount")[PORTFOLIO], start)
     left, right = st.columns(2, gap="large")
@@ -280,7 +287,7 @@ with tab_us:
                           label_visibility="collapsed")
     c1, c2 = st.columns([3, 1])
     with c1:
-        start = window("us_holdwin", "10Y")
+        start = window("us_holdwin", "10Y", fa.index.min())
     with c2:
         show_total = st.toggle("Add total, all countries", key="us_tot")
     fig = go.Figure()
@@ -321,7 +328,7 @@ with tab_us:
     st.subheader("Over time: US holdings in one country")
     who = st.selectbox("Country", abc, index=abc.index("Japan") if "Japan" in abc else 0, key="ab_who")
     c = ab[ab.holder == who]
-    start = window("ab_pf", "5Y")
+    start = window("ab_pf", "5Y", c.date.min())
     cols = [f"US investors abroad: {a}" for a in ab_assets]
     h = cut(c[c.measure == "holdings"].pivot(index="date", columns="market", values="amount")[cols], start)
     n_ = cut(c[c.measure == "net purchases"].pivot(index="date", columns="market", values="amount")[cols], start)
@@ -351,7 +358,7 @@ with tab_us:
     cust_m = cust.resample("ME").last()
     stack = pd.DataFrame({"Central banks, held at the Fed": cust_m, "Central banks, held elsewhere": fo - cust_m,
                           "Private investors": fa - fo}).dropna()
-    st2 = cut(stack, window("us_off", "10Y"))
+    st2 = cut(stack, window("us_off", "10Y", stack.index.min()))
     fig = go.Figure()
     for i, c in enumerate(stack.columns):
         fig.add_trace(go.Scatter(x=st2.index, y=st2[c], name=c, stackgroup="one", mode="lines",
@@ -397,7 +404,7 @@ with tab_jp:
     else:
         fall = series("Japanese bonds (all long-term)", "Foreign", "BoJ balance of payments", "net purchases")
         fgov = series("Japanese government bonds", "Foreign", "BoJ balance of payments", "net purchases")
-        start = window("jb_tot", "3Y")
+        start = window("jb_tot", "3Y", fgov.index.min())
         mo = cut(pd.DataFrame({"Government bonds": fgov, "Other bonds": fall - fgov}).dropna(), start)
         fig = go.Figure()
         for i, c in enumerate(mo.columns):
@@ -445,7 +452,7 @@ with tab_jp:
     ja = ja[["Foreign stocks & funds", "Foreign bonds (long-term)", "Foreign bonds (short-term)"]]
     c1, c2 = st.columns([3, 1])
     with c1:
-        ja = cut(ja, window("jp_rep", "3Y"))
+        ja = cut(ja, window("jp_rep", "3Y", ja.dropna(how="all").index.min()))
     with c2:
         rmode = st.segmented_control("Show", ["Monthly", "Running total"], default="Monthly", key="jp_repmode",
                                      label_visibility="collapsed") or "Monthly"
@@ -470,7 +477,7 @@ with tab_jp:
     res = series("Japan official reserves", "Ministry of Finance", "BoJ balance of payments")
     priv = jp[(jp.market == "Japanese investors abroad") & (jp.holder == "All countries")].set_index("date").amount
     pv = cut(pd.DataFrame({"Japanese investors (excl. reserves): net purchases of foreign government bonds": priv,
-                           "Ministry of Finance: change in FX reserves": res.diff()}), window("jp_pv", "3Y"))
+                           "Ministry of Finance: change in FX reserves": res.diff()}), window("jp_pv", "3Y", priv.index.min()))
     fig = go.Figure()
     for i, c in enumerate(pv.columns):
         fig.add_trace(go.Bar(x=pv.index, y=pv[c], name=c, marker=dict(color=SERIES[i], line=dict(width=0)),
@@ -524,7 +531,8 @@ with tab_oth:
     order = ["Reserves (central bank)", "Government (incl. state pension & wealth funds)",
              "Insurers, pensions & funds", "Households & companies", "Banks", "Portfolio investments (all)"]
     live = [g for g in order if g in c.columns and c[g].last_valid_index() == latest]
-    c = cut(c[live].dropna(), window("sav", "20Y"))
+    c = c[live].dropna()
+    c = cut(c, window("sav", "20Y", c.index.min()))
     fig = go.Figure()
     for i, g in enumerate(live):
         fig.add_trace(go.Scatter(x=c.index, y=c[g], name=g, stackgroup="one", mode="lines",
@@ -570,7 +578,7 @@ with tab_hf:
     st.header("Treasury futures positioning")
     c1, c2 = st.columns([1, 1])
     with c1:
-        start = window("hf", "5Y")
+        start = window("hf", "5Y", tot.index.min())
     with c2:
         hview = st.segmented_control("View", ["Hedge funds by maturity", "Who's on each side"],
                                      default="Hedge funds by maturity", key="hf_view",
@@ -718,7 +726,10 @@ with tab_auc:
             metric = st.segmented_control("Metric", list(METRICS), default="Tail (bp)", key="au_metric") \
                 or "Tail (bp)"
             col, unit = METRICS[metric]
-            a = cut(au[au.tenor == tenor].set_index("date").sort_index(), window("au_win", "5Y"))
+            a = au[au.tenor == tenor].set_index("date").sort_index()
+            if col == "tail_bp":
+                a = a[a.tail_bp.notna()]
+            a = cut(a, window("au_win", "5Y", a.index.min()))
             history_chart(a, col, unit, "au_chart", "term")
             if col == "tail_bp":
                 asof("Reported tails (circles) cover every auction from July 2026. Estimated tails (diamonds) cover "
@@ -734,7 +745,9 @@ with tab_auc:
             mix = st.segmented_control("View", ["By bidder type (auction day)", "By investor type (allotments)"],
                                        default="By bidder type (auction day)", key="au_mixview",
                                        label_visibility="collapsed") or "By bidder type (auction day)"
-            start = window("au_mix", "5Y")
+            al_since = (load_csv(str(ALLOT), ALLOT.stat().st_mtime).date.min()
+                        if ALLOT.exists() and not mix.startswith("By bidder") else au.date.min())
+            start = window("au_mix", "5Y", al_since)
             fig = go.Figure()
             if mix.startswith("By bidder"):
                 a2 = cut(au[au.tenor == tenor].set_index("date").sort_index(), start)
@@ -804,7 +817,8 @@ with tab_auc:
             metric = st.segmented_control("Metric", list(METRICS_J), default="Tail (bp)", key="jg_metric") \
                 or "Tail (bp)"
             col, unit = METRICS_J[metric]
-            a = cut(jg[jg.tenor == tenor].set_index("date").sort_index(), window("jg_win", "5Y"))
+            a = jg[jg.tenor == tenor].set_index("date").sort_index()
+            a = cut(a, window("jg_win", "5Y", a.index.min()))
             history_chart(a, col, unit, "jg_chart")
             asof(f"{len(a)} {tenor} JGB auctions in range · Japan Ministry of Finance · tail = gap between the "
                  f"average and lowest accepted price, shown in bp of yield or in yen per ¥100")
