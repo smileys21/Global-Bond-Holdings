@@ -528,6 +528,45 @@ def auctions() -> pd.DataFrame:
     return out.drop(columns=["dealer", "direct", "indirect"]).sort_values("date")
 
 
+# ------------------------------------------------------------------ JGB auctions (Japan Ministry of Finance)
+JGB_AUCTIONS_OUT = ROOT / "data" / "jgb_auctions.csv"
+MOF_XLS = "https://www.mof.go.jp/english/policy/jgbs/auction/past_auction_results/Auction_Results_for_JGBs.xls"
+JGB_SHEETS = {"2年債": "2-Year", "5年債": "5-Year", "10年債": "10-Year", "20年債": "20-Year", "30年債": "30-Year",
+              "40年債": "40-Year"}
+
+
+def jgb_auctions() -> pd.DataFrame:
+    """Every 2- to 40-year JGB auction: size, bid-to-cover and the official tail (average minus lowest price)."""
+    r = requests.get(MOF_XLS, headers=UA, timeout=180)
+    r.raise_for_status()
+    xls = pd.ExcelFile(io.BytesIO(r.content))
+    out = []
+    for sheet, tenor in JGB_SHEETS.items():
+        raw = pd.read_excel(xls, sheet, header=None)
+        hdr = next(i for i in range(10) if "Auction Date" in [str(v).strip() for v in raw.iloc[i]])
+        cols = [str(v).strip() for v in raw.iloc[hdr]]
+        d = raw.iloc[hdr + 2:].copy()
+        d.columns = cols
+
+        def col(name):
+            c = next((c for c in cols if c.startswith(name)), None)
+            return pd.to_numeric(d[c], errors="coerce") if c else pd.Series(float("nan"), index=d.index)
+        t = pd.DataFrame({
+            "date": pd.to_datetime(d["Auction Date"], errors="coerce"), "tenor": tenor,
+            "size_bn_jpy": col("Offering Amount") / 10, "bids": col("Amounts of Competitive Bids"),
+            "accepted": col("Amounts of Bids Accepted"), "avg_price": col("Weighted Average Price"),
+            "avg_yield": col("Yield at the Average Price"), "low_price": col("Lowest Accepted Price"),
+            "low_yield": col("Yield at the Lowest Accepted Price"), "high_yield_40": col("Highest Accepted Yield"),
+        })
+        t = t.dropna(subset=["date", "accepted"])
+        t["bid_to_cover"] = t["bids"] / t["accepted"]
+        t["tail_yen"] = t["avg_price"] - t["low_price"]
+        t["tail_bp"] = (t["low_yield"] - t["avg_yield"]) * 100
+        t["yield"] = t["low_yield"].fillna(t["high_yield_40"])
+        out.append(t[["date", "tenor", "size_bn_jpy", "yield", "bid_to_cover", "tail_yen", "tail_bp"]])
+    return pd.concat(out).sort_values("date")
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
     jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC (": tic, "CFTC": cftc,
@@ -554,12 +593,27 @@ def main() -> int:
     OUT.parent.mkdir(exist_ok=True)
     df.to_csv(OUT, index=False, date_format="%Y-%m-%d")
     print(f"wrote {len(df):,} rows -> {OUT}")
+    au = None
     try:
         au = auctions()
         au.to_csv(AUCTIONS_OUT, index=False, date_format="%Y-%m-%d")
         print(f"ok   auctions: {len(au):,} rows -> {AUCTIONS_OUT}")
     except Exception as e:  # keep the last good file
         print(f"FAIL auctions: {e}", file=sys.stderr)
+    try:
+        jg = jgb_auctions()
+        jg.to_csv(JGB_AUCTIONS_OUT, index=False, date_format="%Y-%m-%d")
+        print(f"ok   JGB auctions: {len(jg):,} rows")
+    except Exception as e:
+        print(f"FAIL JGB auctions: {e}", file=sys.stderr)
+    if au is not None:
+        try:
+            from tails import update_tails
+            tl = update_tails(au)
+            print(f"ok   tails: {len(tl):,} rows ({(tl.source == 'Helious').sum()} reported, "
+                  f"{(tl.source == 'Estimate').sum()} estimated)")
+        except Exception as e:
+            print(f"FAIL tails: {e}", file=sys.stderr)
     return 1 if len(failed) == len(jobs) else 0
 
 

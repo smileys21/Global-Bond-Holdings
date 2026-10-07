@@ -77,7 +77,7 @@ def buysell(net: pd.Series, pin: tuple = ()) -> go.Figure:
     return fig
 
 
-RANGES = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "20Y": 20, "Max": None}
+RANGES = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "20Y": 20, "All": None}
 
 
 def window(key: str, default: str = "5Y") -> pd.Timestamp | None:
@@ -96,7 +96,7 @@ st.title("Global Bond Tool")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
 tab_us, tab_jp, tab_oth, tab_hf, tab_auc, tab_chk, tab_src = st.tabs(
-    ["United States", "Japan", "Other countries", "Hedge funds (US Treasuries)", "US Treasury auctions",
+    ["United States", "Japan", "Other countries", "Hedge funds (US Treasuries)", "Auctions",
      "Data checks", "Sources"])
 
 # ------------------------------------------------------------------ shared pieces
@@ -608,98 +608,184 @@ with tab_hf:
 
 
 
-# ================================================================== US TREASURY AUCTIONS
+# ================================================================== AUCTIONS
 AUCTIONS = Path(__file__).parent / "data" / "auctions.csv"
+TAILS = Path(__file__).parent / "data" / "tails.csv"
+JGB_AUCTIONS = Path(__file__).parent / "data" / "jgb_auctions.csv"
 TENORS_A = ["2-Year", "3-Year", "5-Year", "7-Year", "10-Year", "20-Year", "30-Year"]
-METRICS = {"Bid-to-cover": ("bid_to_cover", "x", True),
-           "Dealer takedown (%)": ("dealer_pct", "%", False),
-           "Indirect bidders, mostly foreign (%)": ("indirect_pct", "%", True),
-           "Direct bidders, mostly US funds (%)": ("direct_pct", "%", True),
-           "High yield (%)": ("high_yield", "%", None),
-           "High vs median yield (bp)": ("dispersion_bp", "bp", False),
-           "Size ($bn)": ("size_bn", "bn", None)}
+TENORS_J = ["2-Year", "5-Year", "10-Year", "20-Year", "30-Year", "40-Year"]
+METRICS = {"Tail (bp)": ("tail_bp", "bp"),
+           "Bid-to-cover": ("bid_to_cover", "x"),
+           "Dealer takedown (%)": ("dealer_pct", "%"),
+           "Indirect bidders, mostly foreign (%)": ("indirect_pct", "%"),
+           "Direct bidders, mostly US funds (%)": ("direct_pct", "%"),
+           "High yield (%)": ("high_yield", "%"),
+           "Size ($bn)": ("size_bn", "bn")}
+METRICS_J = {"Tail (bp)": ("tail_bp", "bp"), "Tail (yen)": ("tail_yen", "yen"), "Bid-to-cover": ("bid_to_cover", "x"),
+             "Yield (%)": ("yield", "%"), "Size (¥bn)": ("size_bn_jpy", "bn")}
+FMT = {"x": (".2f", "x"), "%": (".2f", "%"), "bp": (".1f", "bp"), "bn": (",.0f", "bn"), "yen": (".2f", " yen")}
 
 
 @st.cache_data(ttl=3600)
-def load_auctions(version: float) -> pd.DataFrame:
-    return pd.read_csv(AUCTIONS, parse_dates=["date"])
+def load_csv(path: str, version: float) -> pd.DataFrame:
+    return pd.read_csv(path, parse_dates=["date"])
+
+
+def history_chart(a: pd.DataFrame, col: str, unit: str, key: str, label_col: str | None = None) -> None:
+    fig = go.Figure()
+    if col == "tail_bp" and "tail_src" in a:
+        for i, (src, name) in enumerate([("Helious", "Reported tail (Helious)"),
+                                         ("Estimate", "Estimated tail (reopenings)")]):
+            s = a[a.tail_src == src]
+            fig.add_trace(go.Scatter(x=s.index, y=s[col], name=name, mode="markers",
+                                     marker=dict(size=8, color=SERIES[0] if i == 0 else SERIES[1],
+                                                 symbol="circle" if i == 0 else "diamond"),
+                                     hovertemplate="%{x|%d %b %Y}: %{y:+.1f}bp<extra></extra>"))
+    else:
+        cd = a[[label_col]].values if label_col else None
+        fig.add_trace(go.Scatter(x=a.index, y=a[col], name="Each auction", mode="lines+markers",
+                                 line=dict(color=SERIES[0], width=1.5), marker=dict(size=7), customdata=cd,
+                                 hovertemplate="%{x|%d %b %Y}" + (" · %{customdata[0]}" if label_col else "")
+                                 + "<br>%{y:.2f}<extra></extra>"))
+    avg = a[col].dropna().rolling(6, min_periods=3).mean()
+    fig.add_trace(go.Scatter(x=avg.index, y=avg.values, name="6-auction average", mode="lines",
+                             line=dict(color=MUTED, width=2, dash="dot"), hovertemplate="%{y:.2f}"))
+    yfmt, ysuf = FMT[unit]
+    fig = style(fig, 400, yfmt, ysuf)
+    fig.update_layout(hovermode="closest")
+    st.plotly_chart(fig, width="stretch", key=key)
+
+
+def verdict(score: int) -> str:
+    return {3: "Strong", 2: "Solid", 1: "Soft", 0: "Weak"}[int(score)]
 
 
 with tab_auc:
-    if not AUCTIONS.exists():
-        st.warning("Auction data hasn't been downloaded yet; it arrives with the next daily refresh.")
+    mkt = st.segmented_control("Market", ["US Treasuries", "Japanese government bonds"], default="US Treasuries",
+                               key="au_mkt", label_visibility="collapsed") or "US Treasuries"
+    with st.expander("How to read auction results", expanded=False):
+        st.markdown(
+            "- **Tail**: how far the auction's cut-off yield landed above the market yield just before bidding "
+            "closed. Positive = the Treasury had to pay up to sell the bonds (weak). Negative ('stopped through') "
+            "= buyers paid more than the market (strong). The single most-watched number.\n"
+            "- **Bid-to-cover**: dollars bid for every dollar sold. Higher = more demand.\n"
+            "- **Dealer takedown**: share left with the primary dealers, the banks obliged to bid. They're the "
+            "buyer of last resort, so a high share means end investors stepped back.\n"
+            "- **Indirect bidders**: bids placed through dealers, mostly foreign central banks and big asset "
+            "managers. **Direct bidders**: bids placed straight with the Treasury, mostly US funds.\n"
+            "- **Japan's tail** is official: the gap between the average and lowest accepted price (or yield). "
+            "Japan doesn't publish who bought.\n"
+            "- Strong/weak is judged against the average of that maturity's previous 6 auctions.")
+
+    if mkt == "US Treasuries":
+        if not AUCTIONS.exists():
+            st.warning("Auction data arrives with the next daily refresh.")
+        else:
+            au = load_csv(str(AUCTIONS), AUCTIONS.stat().st_mtime)
+            au["dkey"] = au.date.dt.strftime("%Y-%m-%d")
+            if TAILS.exists():
+                tl = load_csv(str(TAILS), TAILS.stat().st_mtime)
+                tl["dkey"] = tl.date.dt.strftime("%Y-%m-%d")
+                tl["rank"] = tl.source.map({"Helious": 0, "Estimate": 1})
+                tl = tl.sort_values("rank").drop_duplicates(["dkey", "tenor"])  # reported beats estimated
+                au = au.merge(tl[["dkey", "tenor", "tail_bp", "source"]].rename(columns={"source": "tail_src"}),
+                              on=["dkey", "tenor"], how="left")
+            else:
+                au["tail_bp"], au["tail_src"] = float("nan"), None
+
+            st.header("Latest auction for each maturity")
+            rows_ = []
+            for t in TENORS_A:
+                a = au[au.tenor == t].sort_values("date")
+                if len(a) < 7:
+                    continue
+                last, prev = a.iloc[-1], a.iloc[-7:-1]
+                btc_d = last.bid_to_cover - prev.bid_to_cover.mean()
+                dlr_d = last.dealer_pct - prev.dealer_pct.mean()
+                ind_d = last.indirect_pct - prev.indirect_pct.mean()
+                tail = ("n/a" if pd.isna(last.tail_bp) else
+                        f"{'≈' if last.tail_src == 'Estimate' else ''}{last.tail_bp:+.1f}")
+                score = int(btc_d > 0) + int(dlr_d < 0) + int(ind_d > 0)
+                rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}",
+                              "Type": "Reopening" if last.reopening else "New",
+                              "Size ($bn)": f"{last.size_bn:,.0f}", "High yield (%)": f"{last.high_yield:.3f}",
+                              "Tail (bp)": tail,
+                              "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
+                              "Dealers (%)": f"{last.dealer_pct:.1f} ({dlr_d:+.1f})",
+                              "Indirect (%)": f"{last.indirect_pct:.1f} ({ind_d:+.1f})",
+                              "Direct (%)": f"{last.direct_pct:.1f}", "Read": verdict(score)})
+            st.table(pd.DataFrame(rows_).set_index("Maturity"))
+            asof("Brackets = change vs the average of that maturity's previous 6 auctions · Read counts how many of "
+                 "bid-to-cover (up), dealers (down) and indirect (up) beat that average · Tail: positive = tailed "
+                 "(weak), negative = stopped through (strong); reported by Helious from July 2026, ≈ = our estimate "
+                 "for reopenings · TreasuryDirect auction results")
+
+            st.header("History by maturity")
+            tenor = st.segmented_control("Maturity", TENORS_A, default="10-Year", key="au_tenor") or "10-Year"
+            metric = st.segmented_control("Metric", list(METRICS), default="Tail (bp)", key="au_metric") \
+                or "Tail (bp)"
+            col, unit = METRICS[metric]
+            a = cut(au[au.tenor == tenor].set_index("date").sort_index(), window("au_win", "5Y"))
+            history_chart(a, col, unit, "au_chart", "term")
+            if col == "tail_bp":
+                asof("Reported tails (circles) cover every auction from July 2026. Estimated tails (diamonds) cover "
+                     "reopenings back to 2010: the market yield of the same bond from Treasury's FedInvest daytime "
+                     "price on auction day, which matched reported tails within about 0.5bp on average. Estimates get "
+                     "noisier on days with big market moves (inflation data, March 2020), when prices can shift "
+                     "between Treasury's price snapshot and the 1pm deadline. New-issue tails before July 2026 can't "
+                     "be estimated reliably from free data, so they're left blank.")
+            else:
+                asof(f"{len(a)} {tenor} auctions in range, new issues and reopenings · TreasuryDirect")
+
+            st.header("Demand mix over time")
+            a2 = cut(au[au.tenor == tenor].set_index("date").sort_index(), window("au_mix", "5Y"))
+            fig = go.Figure()
+            for i, (c, n) in enumerate([("indirect_pct", "Indirect (mostly foreign)"),
+                                        ("direct_pct", "Direct (mostly US funds)"), ("dealer_pct", "Dealers (left over)")]):
+                fig.add_trace(go.Bar(x=a2.index, y=a2[c], name=n,
+                                     marker=dict(color=SERIES[[0, 2, 7][i]], line=dict(width=0)),
+                                     hovertemplate="%{y:.1f}%"))
+            fig.update_layout(barmode="stack", bargap=0.15)
+            st.plotly_chart(style(fig, 360, ".0f", "%"), width="stretch", key="au_mixchart")
+            asof(f"Share of the competitive auction taken by each group, {tenor} · TreasuryDirect")
+
     else:
-        au = load_auctions(AUCTIONS.stat().st_mtime)
-        with st.expander("How to read auction results", expanded=False):
-            st.markdown(
-                "- **Bid-to-cover**: dollars bid for every dollar sold. Higher = more demand.\n"
-                "- **Dealer takedown**: share left with the primary dealers, the banks obliged to bid. They're the "
-                "buyer of last resort, so a high share means end investors stepped back. Lower = stronger.\n"
-                "- **Indirect bidders**: bids placed through dealers, mostly foreign central banks and big asset "
-                "managers. The usual read on foreign demand.\n"
-                "- **Direct bidders**: bids placed straight with the Treasury, mostly US funds and banks.\n"
-                "- **High vs median yield**: how far the cut-off yield sat above the middle accepted bid. A wider gap "
-                "means the auction had to reach further for buyers.\n"
-                "- Strong/weak is judged against the average of that maturity's previous 6 auctions.\n"
-                "- Not shown: the 'tail' (auction yield vs the market yield at the 1pm deadline). It needs "
-                "when-issued market prices, which aren't published free.")
+        if not JGB_AUCTIONS.exists():
+            st.warning("JGB auction data arrives with the next daily refresh.")
+        else:
+            jg = load_csv(str(JGB_AUCTIONS), JGB_AUCTIONS.stat().st_mtime)
+            st.header("Latest auction for each maturity")
+            rows_ = []
+            for t in TENORS_J:
+                a = jg[jg.tenor == t].sort_values("date")
+                if len(a) < 7:
+                    continue
+                last, prev = a.iloc[-1], a.iloc[-7:-1]
+                btc_d = last.bid_to_cover - prev.bid_to_cover.mean()
+                has_tail = pd.notna(last.tail_bp)
+                tail_d = last.tail_bp - prev.tail_bp.mean() if has_tail else float("nan")
+                score = int(btc_d > 0) + (int(tail_d < 0) * 2 if has_tail else int(btc_d > 0))
+                rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}",
+                              "Size (¥bn)": f"{last.size_bn_jpy:,.0f}", "Yield (%)": f"{last['yield']:.3f}",
+                              "Tail (bp)": f"{last.tail_bp:.1f} ({tail_d:+.1f})" if has_tail else "n/a",
+                              "Tail (yen)": f"{last.tail_yen:.2f}" if has_tail else "n/a",
+                              "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
+                              "Read": verdict(min(score, 3))})
+            st.table(pd.DataFrame(rows_).set_index("Maturity"))
+            asof(f"Brackets = change vs the average of that maturity's previous 6 auctions · Read weighs the tail "
+                 f"(smaller = better, counts double) and bid-to-cover (higher = better) · the 40-year is sold on "
+                 f"yield, so it has no tail · Japan Ministry of Finance, file updated about monthly, latest auction "
+                 f"{jg.date.max():%d %b %Y}")
 
-        st.header("Latest auction for each maturity")
-        rows_ = []
-        for t in TENORS_A:
-            a = au[au.tenor == t].sort_values("date")
-            if len(a) < 7:
-                continue
-            last, prev = a.iloc[-1], a.iloc[-7:-1]
-            btc_d = last.bid_to_cover - prev.bid_to_cover.mean()
-            dlr_d = last.dealer_pct - prev.dealer_pct.mean()
-            ind_d = last.indirect_pct - prev.indirect_pct.mean()
-            score = int(btc_d > 0) + int(dlr_d < 0) + int(ind_d > 0)
-            rows_.append({"Maturity": t, "Date": f"{last.date:%d %b %Y}", "Type": "Reopening" if last.reopening else "New",
-                          "Size ($bn)": f"{last.size_bn:,.0f}", "High yield (%)": f"{last.high_yield:.3f}",
-                          "Bid-to-cover": f"{last.bid_to_cover:.2f} ({btc_d:+.2f})",
-                          "Dealers (%)": f"{last.dealer_pct:.1f} ({dlr_d:+.1f})",
-                          "Indirect (%)": f"{last.indirect_pct:.1f} ({ind_d:+.1f})",
-                          "Direct (%)": f"{last.direct_pct:.1f}",
-                          "Read": {3: "Strong", 2: "Solid", 1: "Soft", 0: "Weak"}[int(score)]})
-        st.table(pd.DataFrame(rows_).set_index("Maturity"))
-        asof("Figures in brackets = change vs the average of that maturity's previous 6 auctions · Read counts how "
-             "many of bid-to-cover (up), dealers (down) and indirect (up) beat that average: 3 Strong, 2 Solid, "
-             "1 Soft, 0 Weak · TreasuryDirect auction results")
-
-        st.header("History by maturity")
-        tenor = st.segmented_control("Maturity", TENORS_A, default="10-Year", key="au_tenor") or "10-Year"
-        metric = st.segmented_control("Metric", list(METRICS), default="Bid-to-cover", key="au_metric") \
-            or "Bid-to-cover"
-        col, unit, _ = METRICS[metric]
-        a = au[au.tenor == tenor].set_index("date").sort_index()
-        a = cut(a, window("au_win", "5Y"))
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=a.index, y=a[col], name="Each auction", mode="lines+markers",
-                                 line=dict(color=SERIES[0], width=1.5), marker=dict(size=7),
-                                 customdata=a[["term"]].values,
-                                 hovertemplate="%{x|%d %b %Y} · %{customdata[0]}<br>%{y:.2f}<extra></extra>"))
-        avg = a[col].rolling(6, min_periods=3).mean()
-        fig.add_trace(go.Scatter(x=avg.index, y=avg.values, name="6-auction average", mode="lines",
-                                 line=dict(color=MUTED, width=2, dash="dot"), hovertemplate="%{y:.2f}"))
-        yfmt, ysuf = {"x": (".2f", "x"), "%": (".1f", "%"), "bp": (".1f", "bp"), "bn": ("$,.0f", "bn")}[unit]
-        fig = style(fig, 400, yfmt, ysuf)
-        fig.update_layout(hovermode="closest")
-        st.plotly_chart(fig, width="stretch", key="au_chart")
-        asof(f"{len(a)} {tenor} auctions in range, new issues and reopenings · TreasuryDirect, updated the day of "
-             f"each auction")
-
-        st.header("Demand mix over time")
-        a2 = au[au.tenor == tenor].set_index("date").sort_index()
-        a2 = cut(a2, window("au_mix", "5Y"))
-        fig = go.Figure()
-        for i, (c, n) in enumerate([("indirect_pct", "Indirect (mostly foreign)"), ("direct_pct", "Direct (mostly US funds)"),
-                                    ("dealer_pct", "Dealers (left over)")]):
-            fig.add_trace(go.Bar(x=a2.index, y=a2[c], name=n, marker=dict(color=SERIES[[0, 2, 7][i]], line=dict(width=0)),
-                                 hovertemplate="%{y:.1f}%"))
-        fig.update_layout(barmode="stack", bargap=0.15)
-        st.plotly_chart(style(fig, 360, ".0f", "%"), width="stretch", key="au_mixchart")
-        asof(f"Share of the competitive auction taken by each group, {tenor} · TreasuryDirect")
+            st.header("History by maturity")
+            tenor = st.segmented_control("Maturity", TENORS_J, default="30-Year", key="jg_tenor") or "30-Year"
+            metric = st.segmented_control("Metric", list(METRICS_J), default="Tail (bp)", key="jg_metric") \
+                or "Tail (bp)"
+            col, unit = METRICS_J[metric]
+            a = cut(jg[jg.tenor == tenor].set_index("date").sort_index(), window("jg_win", "5Y"))
+            history_chart(a, col, unit, "jg_chart")
+            asof(f"{len(a)} {tenor} JGB auctions in range · Japan Ministry of Finance · tail = gap between the "
+                 f"average and lowest accepted price, shown in bp of yield or in yen per ¥100")
 
 
 # ------------------------------------------------------------------ data checks
@@ -821,9 +907,11 @@ with tab_chk:
 # ------------------------------------------------------------------ sources
 with tab_src:
     fresh = (df.groupby("source").date.max().rename("Latest data").dt.strftime("%d %b %Y").to_frame())
-    if AUCTIONS.exists():
-        fresh.loc["TreasuryDirect auction results (per auction)"] = \
-            f"{load_auctions(AUCTIONS.stat().st_mtime).date.max():%d %b %Y}"
+    for name, path in [("TreasuryDirect auction results (per auction)", AUCTIONS),
+                       ("Japan Ministry of Finance JGB auction results", JGB_AUCTIONS),
+                       ("Auction tails: Helious (reported) + FedInvest (estimated)", TAILS)]:
+        if path.exists():
+            fresh.loc[name, "Latest data"] = f"{load_csv(str(path), path.stat().st_mtime).date.max():%d %b %Y}"
     fresh["Link"] = fresh.index.map({
         "Fed H.4.1 (weekly)": "https://www.federalreserve.gov/releases/h41/",
         "Fed Z.1 Financial Accounts (quarterly)": "https://www.federalreserve.gov/releases/z1/",
@@ -838,6 +926,8 @@ with tab_src:
         "US Treasury TIC US holdings abroad (monthly)": "https://home.treasury.gov/data/treasury-international-capital-tic-system",
         "OFR Hedge Fund Monitor, SEC Form PF (quarterly)": "https://www.financialresearch.gov/hedge-fund-monitor/",
         "TreasuryDirect auction results (per auction)": "https://www.treasurydirect.gov/auctions/auction-query/",
+        "Japan Ministry of Finance JGB auction results": "https://www.mof.go.jp/english/policy/jgbs/auction/past_auction_results/index.html",
+        "Auction tails: Helious (reported) + FedInvest (estimated)": "https://helious.io/auctions",
     })
     st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
     st.caption("Data refreshes daily via GitHub Actions; each source keeps its last good copy if a download fails.")
