@@ -54,7 +54,8 @@ def fed_custody() -> list[pd.DataFrame]:
     src = "Fed H.4.1 (weekly)"
     # Treasuries the Fed holds in custody for foreign central banks
     return [rows(fred("WMTSECL1") / 1e3, "US Treasuries", "Foreign central banks (Fed custody)",
-                 "holdings", src)]
+                 "holdings", src),
+            rows(fred("TREAST") / 1e3, "US Treasuries", "Federal Reserve (weekly balance sheet)", "holdings", src)]
 
 
 # ------------------------------------------------------- Z.1 holders by sector
@@ -293,7 +294,7 @@ def japan_flows() -> list[pd.DataFrame]:
     """Monthly: Japanese investors' net purchases of long-term foreign government bonds by issuer country,
     and foreign investors' net purchases of long-term Japanese government bonds."""
     src = "BoJ balance of payments (monthly)"
-    codes = ([f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113", "BPBP6JYNFA21", "BPBP6JYNFA221",
+    codes = ([f"BPPI6D3NA{c}" for c in JP_SOV_DEST] + ["BPBP6JYNFL22113", "BPBP6JYNFL221", "BPBP6JYNFA21", "BPBP6JYNFA221",
              "BPBP6JYNFA222"] + [f"BPPI6E3N9{c}" for c in JP_BUYERS])
     d = boj("BP01", codes, "201401")
     d.index = [pd.Period(f"{i[:4]}-{i[4:]}", "M").end_time.normalize() for i in d.index]
@@ -306,6 +307,8 @@ def japan_flows() -> list[pd.DataFrame]:
     out.append(rows(conv(sov.sum(axis=1, min_count=1).dropna()), "Japanese investors abroad", "All countries",
                     "net purchases", src))
     out.append(rows(conv(d["BPBP6JYNFL22113"].dropna()), "Japanese government bonds", "Foreign",
+                    "net purchases", src))
+    out.append(rows(conv(d["BPBP6JYNFL221"].dropna()), "Japanese bonds (all long-term)", "Foreign",
                     "net purchases", src))
     # all foreign securities bought by Japanese investors (negative = repatriation)
     for code, label in [("BPBP6JYNFA21", "Foreign stocks & funds"), ("BPBP6JYNFA221", "Foreign bonds (long-term)"),
@@ -429,12 +432,53 @@ def imf_iip() -> list[pd.DataFrame]:
     return out
 
 
+# ------------------------------------------------------------------ TIC table 2 (US investors abroad)
+def tic_table2() -> list[pd.DataFrame]:
+    """US residents' holdings and net purchases of foreign long-term securities by country, monthly."""
+    src = "US Treasury TIC US holdings abroad (monthly)"
+    txt = get(TIC + "slt_table2.txt")
+    lines = txt.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("country\tcountry_code"))
+    df = pd.read_csv(io.StringIO("\n".join(lines[start:])), sep="\t")
+    df = df[df["date"].astype(str).str.match(r"\d{4}-\d{2}$")]
+    df["date"] = pd.to_datetime(df["date"]) + pd.offsets.MonthEnd(0)
+    df["country"] = df["country"].str.strip().replace({"Grand Total": "All countries"})
+    out = []
+    for key, market in [("govt_bond", "Foreign government bonds"), ("corp_bond", "Foreign corporate bonds"),
+                        ("eqty", "Foreign stocks")]:
+        for col, measure in [(f"us_lt_{key}_pos", "holdings"), (f"us_lt_{key}_net", "net purchases")]:
+            v = pd.to_numeric(df[col], errors="coerce") / 1e3
+            out.append(pd.DataFrame({"date": df["date"], "market": f"US investors abroad: {market}",
+                                     "holder": df["country"], "measure": measure, "amount": v,
+                                     "source": src}).dropna())
+    return out
+
+
+# ------------------------------------------------------------------ OFR hedge fund monitor (Form PF)
+OFR = "https://data.financialresearch.gov/hf/v1/series/timeseries"
+OFR_SERIES = {"FPF-ASSETCLASS_LTREASURY_SUM": "Long Treasury exposure",
+              "FPF-ASSETCLASS_STREASURY_SUM": "Short Treasury exposure",
+              "FPF-BORROW_REPO_SUM": "Repo borrowing"}
+
+
+def ofr() -> list[pd.DataFrame]:
+    src = "OFR Hedge Fund Monitor, SEC Form PF (quarterly)"
+    out = []
+    for code, name in OFR_SERIES.items():
+        r = requests.get(OFR, params={"mnemonic": code}, headers=UA, timeout=120)
+        r.raise_for_status()
+        s = pd.Series({pd.Timestamp(d): v for d, v in r.json() if v is not None}).sort_index() / 1e9
+        out.append(rows(s, "Hedge funds (all, Form PF)", name, "holdings", src))
+    return out
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
     jobs = {"Fed H.4.1": fed_custody, "Z.1": z1_holders, "TIC (": tic, "CFTC": cftc,
             "BoJ Flow of Funds": japan_holders, "BoJ balance of payments": japan_flows,
             "ONS": uk_holders, "ECB": euro_holders,
-            "TIC long-term securities": tic_table1, "IMF": imf_iip}
+            "TIC long-term securities": tic_table1, "IMF": imf_iip,
+            "TIC US holdings abroad": tic_table2, "OFR": ofr}
     frames, failed = [], []
     old = pd.read_csv(OUT, parse_dates=["date"]) if OUT.exists() else None
     for name, fn in jobs.items():

@@ -95,8 +95,8 @@ def cut(s, start):
 st.title("Global Bond Tool")
 st.caption("Who owns, buys and sells government bonds. All figures in US dollars.")
 
-tab_own, tab_x, tab_hf, tab_src = st.tabs(
-    ["Ownership", "Cross-border flows", "Hedge funds (US Treasuries)", "Sources"])
+tab_own, tab_x, tab_hf, tab_chk, tab_src = st.tabs(
+    ["Ownership", "Cross-border flows", "Hedge funds (US Treasuries)", "Data checks", "Sources"])
 
 # ------------------------------------------------------------------ ownership
 MARKETS = {"US": "US Treasuries", "Japan": "Japanese government bonds", "UK": "UK gilts",
@@ -192,7 +192,7 @@ def window_pick(key: str) -> list:
 
 with tab_x:
     view = st.segmented_control(
-        "View", ["Into US Treasuries", "Into US stocks & bonds", "Japanese investors abroad",
+        "View", ["Into US Treasuries", "Into US stocks & bonds", "US investors abroad", "Japan",
                  "Where countries keep their foreign savings"],
         default="Into US Treasuries", key="xview", label_visibility="collapsed") or "Into US Treasuries"
 
@@ -305,21 +305,74 @@ with tab_x:
         asof(f"As of {latest_m:%b %Y} · US Treasury TIC, monthly · holdings move with prices too, so the bars show "
              f"actual buying and selling · Treasury bills are excluded here")
 
-    # ---------------- Japanese investors abroad
-    elif view == "Japanese investors abroad":
+    # ---------------- US investors abroad
+    elif view == "US investors abroad":
+        ab = df[df.source == "US Treasury TIC US holdings abroad (monthly)"]
+        ab_assets = ["Foreign government bonds", "Foreign corporate bonds", "Foreign stocks"]
+        latest_m = ab.date.max()
+        tot_c = ab[(ab.measure == "holdings") & (ab.date == latest_m)].groupby("holder").amount.sum()
+        countries = tot_c[~tot_c.index.str.startswith(AGGREGATE + ("All countries",))].sort_values(
+            ascending=False).index.tolist()
+
+        st.subheader("Where US investors are buying and selling abroad")
+        asset = st.segmented_control("Asset", ab_assets, default="Foreign government bonds", key="abasset",
+                                     label_visibility="collapsed") or "Foreign government bonds"
+        k = window_pick("abwin")
+        win = sorted(ab.date.unique())[-k:]
+        sel = ab[(ab.measure == "net purchases") & ab.date.isin(win) & ab.holder.isin(countries)
+                 & (ab.market == f"US investors abroad: {asset}")]
+        st.plotly_chart(buysell(sel.groupby("holder").amount.sum().sort_values()), width="stretch")
+        asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · US residents' net "
+             f"purchases of {asset.lower()} by issuing country · US Treasury TIC, monthly")
+
+        st.subheader("US holdings in one country")
+        default = "Japan" if "Japan" in countries else countries[0]
+        who = st.selectbox("Country", countries, index=countries.index(default), key="abwho")
+        c = ab[ab.holder == who]
+        start = window("ab1", "5Y")
+        h = cut(c[c.measure == "holdings"].pivot(index="date", columns="market", values="amount"), start)
+        n_ = cut(c[c.measure == "net purchases"].pivot(index="date", columns="market", values="amount"), start)
+        cols = [f"US investors abroad: {a}" for a in ab_assets]
+        left, right = st.columns(2, gap="large")
+        with left:
+            fig = go.Figure()
+            for i, a in enumerate(cols):
+                fig.add_trace(go.Scatter(x=h.index, y=h[a], name=a.split(": ")[1], stackgroup="one", mode="lines",
+                                         line=dict(width=0.5, color=SURFACE), fillcolor=SERIES[i],
+                                         hovertemplate="%{y:$,.0f}bn"))
+            st.markdown("**Holdings**")
+            st.plotly_chart(style(fig, 360), width="stretch")
+        with right:
+            fig = go.Figure()
+            for i, a in enumerate(cols):
+                fig.add_trace(go.Bar(x=n_.index, y=n_[a], name=a.split(": ")[1],
+                                     marker=dict(color=SERIES[i], line=dict(width=0)), hovertemplate="%{y:$,.1f}bn"))
+            fig.update_layout(barmode="relative", bargap=0.15)
+            st.markdown("**Monthly net purchases**")
+            st.plotly_chart(style(fig, 360), width="stretch")
+        asof(f"As of {latest_m:%b %Y} · US Treasury TIC, monthly · long-term securities only · countries are "
+             f"where the issuer is based, so stocks bought on a London or Dublin listing may show up there")
+
+    # ---------------- Japan
+    elif view == "Japan":
         jp = df[df.source.str.contains("BoJ balance of payments")]
         out_ = jp[(jp.market == "Japanese investors abroad") & (jp.holder != "All countries")]
         jmonths = sorted(out_.date.unique())
+        st.info("Part 1 is Japanese money going abroad. Part 2 is foreign money coming into Japan. All flows are "
+                "Japan's balance of payments via the Bank of Japan, monthly, about 5 weeks behind, converted to USD "
+                "at each month's average exchange rate.")
 
-        st.subheader("Where Japanese investors are buying and selling foreign government bonds")
+        st.header("Part 1: Japanese money going abroad")
+        st.subheader("Which countries' government bonds Japanese investors are buying and selling")
         k = window_pick("jpwin")
         win = jmonths[-k:]
         st.plotly_chart(buysell(out_[out_.date.isin(win)].groupby("holder").amount.sum().sort_values()),
                         width="stretch")
-        asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · blue = net buyer, "
-             f"red = net seller · Japan balance of payments via Bank of Japan, monthly, about 5 weeks behind")
+        asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · Japanese investors "
+             f"(not the government's reserves) buying long-term government bonds issued by each country · "
+             f"blue = Japan bought, red = Japan sold")
 
-        st.subheader("Cumulative buying and selling by country")
+        st.subheader("Running total by country")
         jc = out_.pivot(index="date", columns="holder", values="amount").fillna(0)
         jpick = st.multiselect("Countries", sorted(jc.columns),
                                default=["United States", "France", "United Kingdom", "Germany", "Italy"],
@@ -329,27 +382,41 @@ with tab_x:
         for i, c in enumerate(jpick):
             line(fig, cut(jc[c], start).cumsum(), c, SERIES[i])
         st.plotly_chart(style(fig, 420), width="stretch")
-        asof("Running total of monthly net purchases from the start of the selected range · a falling line = "
-             "steady selling")
+        asof("Same data as the bars above, added up month by month from the start of the range · United States "
+             "rising = Japanese investors have kept adding to US government bonds · a falling line = steady selling")
 
         st.subheader("Repatriation: are Japanese investors bringing money home?")
         ja = df[df.market == "Japanese investors abroad (all securities)"].pivot(
             index="date", columns="holder", values="amount")
-        ja = cut(ja[["Foreign stocks & funds", "Foreign bonds (long-term)", "Foreign bonds (short-term)"]],
-                 window("jprep", "3Y"))
+        ja = ja[["Foreign stocks & funds", "Foreign bonds (long-term)", "Foreign bonds (short-term)"]]
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            ja = cut(ja, window("jprep", "3Y"))
+        with c2:
+            rmode = st.segmented_control("Show", ["Monthly", "Running total"], default="Monthly", key="repmode",
+                                         label_visibility="collapsed") or "Monthly"
         fig = go.Figure()
-        for i, c in enumerate(ja.columns):
-            fig.add_trace(go.Bar(x=ja.index, y=ja[c], name=c, marker=dict(color=SERIES[i], line=dict(width=0)),
-                                 hovertemplate="%{y:$,.1f}bn"))
-        fig.update_layout(barmode="relative", bargap=0.15)
+        if rmode == "Monthly":
+            for i, c in enumerate(ja.columns):
+                fig.add_trace(go.Bar(x=ja.index, y=ja[c], name=c, marker=dict(color=SERIES[i], line=dict(width=0)),
+                                     hovertemplate="%{y:$,.1f}bn"))
+            fig.update_layout(barmode="relative", bargap=0.15)
+        else:
+            for i, c in enumerate(ja.columns):
+                line(fig, ja[c].cumsum(), c, SERIES[i])
+            line(fig, ja.sum(axis=1).cumsum(), "Total", INK, 2.5)
         st.plotly_chart(style(fig, 380), width="stretch")
         asof(f"Monthly through {ja.index[-1]:%b %Y} · Japanese investors' net purchases of all foreign stocks and "
-             f"bonds · below zero = selling abroad and bringing money home (repatriation)")
+             f"bonds · below zero = selling foreign securities (repatriation)")
+        st.caption("What this does and doesn't show: it records Japanese investors selling foreign securities. It "
+                   "doesn't show whether they then converted the proceeds into yen (some may sit in dollar deposits "
+                   "or be hedged) or what they bought at home. For the domestic side, the Ownership tab (Japan) shows "
+                   "insurers, banks and pensions adding or cutting Japanese government bonds each quarter.")
 
-        st.subheader("Private investors vs the Ministry of Finance")
+        st.subheader("Japanese investors vs the Ministry of Finance")
         res = series("Japan official reserves", "Ministry of Finance", "BoJ balance of payments")
         priv = df[(df.market == "Japanese investors abroad") & (df.holder == "All countries")].set_index("date").amount
-        pv = pd.DataFrame({"Private investors: net purchases of foreign government bonds": priv,
+        pv = pd.DataFrame({"Japanese investors (excl. reserves): net purchases of foreign government bonds": priv,
                            "Ministry of Finance: change in FX reserves": res.diff()})
         pv = cut(pv, window("jppv", "3Y"))
         fig = go.Figure()
@@ -358,35 +425,36 @@ with tab_x:
                                  hovertemplate="%{y:$,.1f}bn"))
         fig.update_layout(barmode="group", bargap=0.2)
         st.plotly_chart(style(fig, 380), width="stretch")
-        asof(f"Reserves monthly through {res.index[-1]:%b %Y} (IMF via FRED) · private flows through "
+        asof(f"Reserves monthly through {res.index[-1]:%b %Y} (IMF via FRED) · Japanese investor flows through "
              f"{priv.index.max():%b %Y} · reserve changes also include currency and price moves")
-        st.caption("Japan's FX reserves are owned by the Ministry of Finance and are what it sells to intervene. "
-                   "A big drop in reserves with no matching private selling is intervention. This is why the Into "
-                   "US Treasuries view can show Japan selling far more than this view: in May–July 2026 TIC shows "
-                   "Japan selling \\$88.6bn of Treasuries, \\$73bn of it bills, while reserves fell \\$75bn in May alone. "
-                   "Private investors sold only \\$4.7bn of long-term US government bonds over the same months.")
+        st.caption("Both bars are Japanese residents only. The first covers life insurers, banks, pension funds "
+                   "(including the GPIF, the government pension fund) and households, i.e. everyone except the "
+                   "Ministry of Finance's reserves. The reserves are what it sells to intervene, so a big drop in "
+                   "reserves with no matching investor selling is intervention.")
 
-        st.subheader("Who's buying and selling Japanese bonds")
+        st.header("Part 2: foreign money coming into Japan")
+        st.subheader("Who's buying and selling Japanese bonds, by investor country")
         jb = df[df.market == "Japanese bonds by buyer"]
         k2 = window_pick("jbwin")
         bm = sorted(jb.date.unique())[-k2:]
         st.plotly_chart(buysell(jb[jb.date.isin(bm)].groupby("holder").amount.sum().sort_values()), width="stretch")
-        asof(f"Net purchases {pd.Timestamp(bm[0]):%b %Y} to {pd.Timestamp(bm[-1]):%b %Y} · foreign investors' net "
-             f"purchases of Japanese long-term bonds, by investor country · Japan balance of payments")
+        asof(f"Net purchases {pd.Timestamp(bm[0]):%b %Y} to {pd.Timestamp(bm[-1]):%b %Y} · all Japanese long-term "
+             f"bonds (government and corporate) · Japan doesn't publish holdings by country, only buying and selling")
 
-        fj = series("Japanese government bonds", "Foreign", "BoJ balance of payments", "net purchases")
-        fjc = cut(fj, window("jpf", "3Y"))
-        fig = go.Figure(go.Bar(x=fjc.index, y=fjc.values,
-                               marker=dict(color=[BUY if v >= 0 else SELL for v in fjc.values], line=dict(width=0)),
-                               hovertemplate="%{y:$,.1f}bn<extra></extra>"))
-        fig = style(fig, 320)
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, width="stretch")
-        asof(f"Monthly through {fj.index[-1]:%b %Y} · all foreign investors' net purchases of long-term Japanese "
-             f"government bonds")
-        st.caption("Japan publishes buying by country but not holdings by country, so unlike the US view there is "
-                   "no country holdings chart. Country figures cover all Japanese long-term bonds (mostly government). "
-                   "Converted to USD at each month's average exchange rate.")
+        st.subheader("All foreign investors, monthly")
+        fall = series("Japanese bonds (all long-term)", "Foreign", "BoJ balance of payments", "net purchases")
+        fgov = series("Japanese government bonds", "Foreign", "BoJ balance of payments", "net purchases")
+        start = window("jpf", "3Y")
+        fa2, fg2 = cut(fall, start), cut(fgov, start)
+        fig = go.Figure(go.Bar(x=fa2.index, y=fa2.values, name="All long-term bonds", showlegend=False,
+                               marker=dict(color=[BUY if v >= 0 else SELL for v in fa2.values], line=dict(width=0)),
+                               hovertemplate="%{y:$,.1f}bn"))
+        fig.add_trace(go.Scatter(x=fg2.index, y=fg2.values, name="Of which government bonds", mode="lines+markers",
+                                 line=dict(color=INK, width=2), marker=dict(size=6),
+                                 hovertemplate="%{y:$,.1f}bn"))
+        st.plotly_chart(style(fig, 340), width="stretch")
+        asof(f"Monthly through {fall.index[-1]:%b %Y} · bars = all Japanese long-term bonds (blue = bought, red = "
+             f"sold), which add up to the country chart above for the same months · line = the government-bond part")
 
     # ---------------- foreign assets vs reserves
     else:
@@ -454,7 +522,7 @@ with tab_hf:
             "- It's very leveraged. When it unwinds in a hurry (March 2020, April 2025), hedge funds dump bonds all "
             "at once, Treasury yields jump, and in 2020 the Fed had to step in.\n"
             "- So the size of this trade, and whether it's shrinking, tells you how fragile the Treasury market is.\n"
-            "- The two charts below show its two legs: the futures (sold) and the actual bonds (held).")
+            "- The charts below show its two legs: the futures (sold) and the actual bonds (held).")
     st.subheader("Leg 1, the futures: who's on each side")
     t2 = cut(tot, start)
     fig = go.Figure()
@@ -468,24 +536,152 @@ with tab_hf:
                "fund line falls while the asset manager line holds steady, someone else has to take the selling side, "
                "here dealers (big banks), whose line has been rising.")
 
-    st.subheader("Leg 2, the bonds: hedge fund Treasury holdings")
-    cay = pd.DataFrame({"Notes & bonds (basis trade leg)": series("US Treasury notes & bonds (Cayman)",
-                                                                   "Cayman Islands", "TIC (monthly)"),
-                        "Bills (cash parking)": series("US Treasury bills (Cayman)", "Cayman Islands",
-                                                       "TIC (monthly)")}).dropna()
+    st.subheader("Leg 2, the bonds: all hedge funds' Treasury positions")
+    ofr_d = df[df.source.str.startswith("OFR")].pivot(index="date", columns="holder", values="amount")
+    od = cut(ofr_d, start)
+    fig = go.Figure()
+    line(fig, od["Long Treasury exposure"], "Long (bonds held + futures bought)", SERIES[0])
+    line(fig, od["Short Treasury exposure"], "Short (futures sold + bonds borrowed and sold)", SERIES[1])
+    line(fig, od["Repo borrowing"], "Repo borrowing (money borrowed against bonds)", SERIES[3])
+    st.plotly_chart(style(fig, 360), width="stretch")
+    asof(f"Quarterly through {ofr_d.index[-1]:%d %b %Y}, released about 2.5 months later · Office of Financial "
+         f"Research, from hedge funds' SEC Form PF filings · positions are 10-year-equivalent, so levels don't "
+         f"match the CFTC face values, but direction does")
+    st.caption("How to read it: this is every large US-registered hedge fund's actual Treasury book. A real "
+               "unwind shows the short line and the long line falling together and repo borrowing dropping. In "
+               "Q2 2026 the short fell but the long held flat and repo borrowing rose to a new record, so the "
+               "trade was being trimmed on the futures side, not dismantled.")
+
+    st.subheader("Monthly read: Treasuries held in the Cayman Islands")
+    cay = pd.DataFrame({"Notes & bonds": series("US Treasury notes & bonds (Cayman)", "Cayman Islands",
+                                                "TIC (monthly)"),
+                        "Bills": series("US Treasury bills (Cayman)", "Cayman Islands", "TIC (monthly)")}).dropna()
     cy = cut(cay, start)
     fig = go.Figure()
     for i, c in enumerate(cay.columns):
         fig.add_trace(go.Scatter(x=cy.index, y=cy[c], name=c, stackgroup="one", mode="lines",
                                  line=dict(width=0.5, color=SURFACE), fillcolor=SERIES[i * 4],
                                  hovertemplate="%{y:$,.0f}bn"))
-    st.plotly_chart(style(fig, 340), width="stretch")
-    asof(f"Monthly through {cay.index[-1]:%b %Y} · Treasuries held in the Cayman Islands, where most hedge funds "
-         f"are registered · US Treasury TIC · split available from 2020")
-    st.caption("How to read it: the blue layer is the bonds hedge funds hold against their futures short. If the "
-               "trade is being unwound, blue falls at the same time as the hedge fund line in Leg 1, and those bond "
-               "sales hit the market. Money moving from blue into bills (pink) means funds are pulling back into "
-               "cash-like holdings rather than rolling the trade.")
+    st.plotly_chart(style(fig, 300), width="stretch")
+    asof(f"Monthly through {cay.index[-1]:%b %Y} · US Treasury TIC")
+    st.caption("A partial, faster proxy only. Cayman-registered funds hold about \\$250bn of notes and bonds, a "
+               "fraction of hedge funds' \\$2.4tn long book above, and it hasn't tracked the futures quarter to "
+               "quarter (in Q1 2026 Cayman rose while the futures short and filings both fell). Use it as an early "
+               "hint between the quarterly filings, not as the bond leg itself.")
+
+
+# ------------------------------------------------------------------ data checks
+def _s(market: str, holder: str, src: str, measure: str = "holdings") -> pd.Series:
+    x = df[(df.market == market) & (df.holder == holder) & (df.measure == measure)
+           & df.source.str.contains(src, regex=False)]
+    return x.set_index("date")["amount"].sort_index()
+
+
+def run_checks() -> pd.DataFrame:
+    out = []
+
+    def add(name, a_label, a, b_label, b, tol_pct, why):
+        diff = a - b
+        pct = abs(diff) / max(abs(a), abs(b), 1e-9) * 100
+        status = "Agrees" if pct <= tol_pct else "Explained gap" if why.startswith("Expected") else "Doesn't reconcile"
+        out.append({"Check": name, "Source A": f"{a_label}: {a:,.1f}", "Source B": f"{b_label}: {b:,.1f}",
+                    "Gap ($bn)": f"{diff:+,.1f}", "Status": status, "Why": why})
+
+    try:  # 1. foreign holdings, TIC vs Z.1
+        z = _s("US Treasuries", "Foreign", "Z.1")
+        t = _s("US Treasuries", "Foreign (all)", "TIC (monthly)")
+        q = z.index[-1]
+        add(f"Foreign holdings of Treasuries, {q:%b %Y}", "Treasury TIC", t[:q].iloc[-1], "Fed Z.1", z.iloc[-1], 1.0,
+            "Z.1 builds its foreign number from TIC, so these should be within a fraction of a percent.")
+    except Exception:
+        pass
+    try:  # 2. Fed holdings, H.4.1 vs Z.1
+        z = _s("US Treasuries", "Central bank", "Z.1")
+        h = _s("US Treasuries", "Federal Reserve (weekly balance sheet)", "H.4.1")
+        q = z.index[-1]
+        add(f"Fed's Treasury holdings, {q:%b %Y}", "Fed weekly balance sheet", h[:q].iloc[-1], "Fed Z.1", z.iloc[-1],
+            1.0, "Expected: the two Fed releases measure the holdings on different bases. The gap has held "
+                 "between about $340bn and $490bn every quarter for two years, so changes are comparable even if "
+                 "levels aren't.")
+    except Exception:
+        pass
+    try:  # 3. Fed custody vs foreign official
+        fo = _s("US Treasuries", "Foreign official (all)", "TIC (monthly)")
+        cu = _s("US Treasuries", "Foreign central banks (Fed custody)", "H.4.1").resample("ME").last()
+        m = fo.index[-1]
+        add(f"Central bank Treasuries, {m:%b %Y}", "All foreign official (TIC)", fo.iloc[-1],
+            "Held at the NY Fed", cu[m], 0.0, "Expected: custody at the Fed is a subset, about 70% of the total. "
+                                              "The rest sits with private custodians like Euroclear.")
+    except Exception:
+        pass
+    try:  # 4. Japan: TIC selling vs reserves + private
+        jn = _s("US Treasuries", "Japan", "TIC (monthly)", "net purchases")
+        ms = jn.index[-3:]
+        res = _s("Japan official reserves", "Ministry of Finance", "BoJ")
+        r_chg = res[ms[-1]] - res[:ms[0] - pd.offsets.MonthEnd(1)].iloc[-1]
+        pv = df[(df.market == "Japanese investors abroad") & (df.holder == "United States")].set_index("date").amount
+        add(f"Japan's Treasury selling, {ms[0]:%b}–{ms[-1]:%b %Y}", "TIC: all of Japan", jn[ms].sum(),
+            "Reserves change + Japanese investors' US govt bonds", r_chg + pv[ms].sum(), 10.0,
+            "Expected to be close, not exact: reserve changes include non-US assets, deposits and price moves.")
+    except Exception:
+        pass
+    try:  # 5. Japan BoP: countries sum to total
+        jb = df[df.market == "Japanese bonds by buyer"]
+        tot = _s("Japanese bonds (all long-term)", "Foreign", "BoJ balance", "net purchases")
+        m = tot.index[-1]
+        add(f"Foreign buying of Japanese bonds, {m:%b %Y}", "Sum of the country bars",
+            jb[jb.date == m].amount.sum(), "Japan's reported total", tot.iloc[-1], 30.0,
+            "Expected: the app shows 23 main countries; the rest sit in smaller regions not charted.")
+    except Exception:
+        pass
+    try:  # 6. Japan JGB: BoJ holdings change vs BoP flows
+        h = _s("Japanese government bonds", "Foreign", "BoJ Flow")
+        f = _s("Japanese government bonds", "Foreign", "BoJ balance", "net purchases")
+        q, p = h.index[-1], h.index[-2]
+        add(f"Foreign holdings of Japanese govt bonds, change in Q{q.quarter} {q.year}", "BoJ holdings change",
+            h.iloc[-1] - h.iloc[-2], "Sum of monthly foreign buying", f[(f.index > p) & (f.index <= q)].sum(), 40.0,
+            "Expected to point the same way: holdings also move with bond prices and the yen-dollar rate.")
+    except Exception:
+        pass
+    try:  # 7. TIC tables agree with each other
+        a = _s("US Treasury notes & bonds", "Cayman Islands", "long-term securities")
+        b = _s("US Treasury notes & bonds (Cayman)", "Cayman Islands", "TIC (monthly)")
+        add(f"Cayman notes & bonds, {a.index[-1]:%b %Y}", "TIC table 1", a.iloc[-1], "TIC table 3", b.iloc[-1], 0.5,
+            "Same Treasury survey published two ways; should match exactly.")
+    except Exception:
+        pass
+    try:  # 8. US buying Japanese bonds, two countries' data
+        us_jp = _s("US investors abroad: Foreign government bonds", "Japan", "abroad", "net purchases")
+        jp_us = df[(df.market == "Japanese bonds by buyer") & (df.holder == "United States")].set_index("date").amount
+        ms = us_jp.index[-3:]
+        add(f"US investors buying Japanese bonds, {ms[0]:%b}–{ms[-1]:%b %Y}", "US data (govt bonds)",
+            us_jp[ms].sum(), "Japan's data (all long-term bonds)", jp_us.reindex(ms).sum(), 25.0,
+            "Partly explained: Japan's figure includes corporate bonds and books trades by the counterparty's "
+            "location, so US-based dealers and custodians acting for others inflate it.")
+    except Exception:
+        pass
+    try:  # 9. Hedge funds: futures vs filings direction
+        lev = df[df.source.str.startswith("CFTC") & (df.holder == "Leveraged funds")].groupby("date").amount.sum()
+        o = df[df.source.str.startswith("OFR")].pivot(index="date", columns="holder", values="amount")
+        q, p = o.index[-1], o.index[-2]
+        add(f"Hedge fund short, change in Q{q.quarter} {q.year}", "CFTC futures short",
+            -(lev[:q].iloc[-1] - lev[:p].iloc[-1]), "Form PF short exposure",
+            o.loc[q, "Short Treasury exposure"] - o.loc[p, "Short Treasury exposure"], 50.0,
+            "Expected to point the same way: Form PF covers all short positions and is 10-year-equivalent, "
+            "while CFTC is face value of futures only.")
+    except Exception:
+        pass
+    return pd.DataFrame(out)
+
+
+with tab_chk:
+    st.subheader("Do the overlapping sources agree?")
+    st.caption("Several sources measure the same thing from different angles. These checks run on every data "
+               "refresh. Agrees = within normal rounding. Explained gap = a known difference in how the sources "
+               "count. Doesn't reconcile = a gap worth keeping in mind when reading the charts.")
+    chk = run_checks()
+    if len(chk):
+        st.table(chk.set_index("Check"))
 
 # ------------------------------------------------------------------ sources
 with tab_src:
@@ -501,6 +697,8 @@ with tab_src:
         "ECB securities holdings (quarterly)": "https://data.ecb.europa.eu/data/datasets/SHSS",
         "US Treasury TIC long-term securities (monthly)": "https://home.treasury.gov/data/treasury-international-capital-tic-system",
         "IMF international investment position (quarterly)": "https://data.imf.org/",
+        "US Treasury TIC US holdings abroad (monthly)": "https://home.treasury.gov/data/treasury-international-capital-tic-system",
+        "OFR Hedge Fund Monitor, SEC Form PF (quarterly)": "https://www.financialresearch.gov/hedge-fund-monitor/",
     })
     st.dataframe(fresh, width="stretch", column_config={"Link": st.column_config.LinkColumn(display_text="Open")})
     st.caption("Data refreshes daily via GitHub Actions; each source keeps its last good copy if a download fails.")
