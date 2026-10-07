@@ -63,9 +63,9 @@ def line(fig: go.Figure, s: pd.Series, name: str, color: str, width: float = 2) 
                              line=dict(color=color, width=width), hovertemplate="%{y:$,.0f}bn"))
 
 
-def buysell(net: pd.Series) -> go.Figure:
-    """Horizontal bar chart of the 8 largest net buyers and 8 largest net sellers."""
-    show = pd.concat([net.head(8), net.tail(8)])
+def buysell(net: pd.Series, pin: tuple = ()) -> go.Figure:
+    """Horizontal bar chart of the 8 largest net buyers and 8 largest net sellers, plus any pinned names."""
+    show = pd.concat([net.head(8), net.tail(8), net[net.index.isin(pin)]])
     show = show[~show.index.duplicated()].sort_values()
     fig = go.Figure(go.Bar(x=show.values, y=show.index, orientation="h",
                            marker=dict(color=[BUY if v >= 0 else SELL for v in show.values], line=dict(width=0)),
@@ -378,9 +378,11 @@ with tab_jp:
     st.subheader("Ranking")
     k = window_pick("jb_win")
     bm = sorted(jb.date.unique())[-k:]
-    st.plotly_chart(buysell(jb[jb.date.isin(bm)].groupby("holder").amount.sum().sort_values()), width="stretch")
+    st.plotly_chart(buysell(jb[jb.date.isin(bm)].groupby("holder").amount.sum().sort_values(),
+                            pin=("United States",)), width="stretch")
     asof(f"Net purchases {pd.Timestamp(bm[0]):%b %Y} to {pd.Timestamp(bm[-1]):%b %Y} · all Japanese long-term bonds "
-         f"(government and corporate), by investor country")
+         f"(government and corporate) · country = where the other side of the trade sits, so financial hubs "
+         f"(US, UK) include investors from elsewhere trading through New York and London")
     st.subheader("Over time")
     view = st.segmented_control("View", ["By country (running total)", "All foreign investors (monthly)"],
                                 default="By country (running total)", key="jb_view",
@@ -421,10 +423,12 @@ with tab_jp:
     st.subheader("Ranking: where Japanese investors are buying and selling bonds")
     k = window_pick("jo_win")
     win = sorted(out_.date.unique())[-k:]
-    st.plotly_chart(buysell(out_[out_.date.isin(win)].groupby("holder").amount.sum().sort_values()), width="stretch")
-    asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · long-term "
+    st.plotly_chart(buysell(out_[out_.date.isin(win)].groupby("holder").amount.sum().sort_values(),
+                            pin=("United States",)), width="stretch")
+    asof(f"Net purchases {pd.Timestamp(win[0]):%b %Y} to {pd.Timestamp(win[-1]):%b %Y} · United States always "
+         f"shown · long-term "
          + ("government bonds; Japan only itemizes 12 issuers, everything else is one 'other' bar · switch to "
-            "All bonds to see what's inside it (lately mostly South Korea)"
+            "All bonds to see which countries are likely inside it (Japan doesn't break it out)"
             if gov_only else "bonds of all kinds (government and corporate) by the issuer's country"))
     st.subheader("Over time: running total by country")
     running_total(out_.pivot(index="date", columns="holder", values="amount"),
@@ -682,14 +686,17 @@ def run_checks() -> pd.DataFrame:
             "Same Treasury survey published two ways; should match exactly.")
     except Exception:
         pass
-    try:  # 8. US buying Japanese bonds, two countries' data
-        us_jp = _s("US investors abroad: Foreign government bonds", "Japan", "abroad", "net purchases")
+    try:  # 8. US buying Japanese bonds, like for like (all bonds), 12 months
+        g = _s("US investors abroad: Foreign government bonds", "Japan", "abroad", "net purchases")
+        c = _s("US investors abroad: Foreign corporate bonds", "Japan", "abroad", "net purchases")
         jp_us = df[(df.market == "Japanese bonds by buyer") & (df.holder == "United States")].set_index("date").amount
-        ms = us_jp.index[-3:]
-        add(f"US investors buying Japanese bonds, {ms[0]:%b}–{ms[-1]:%b %Y}", "US data (govt bonds)",
-            us_jp[ms].sum(), "Japan's data (all long-term bonds)", jp_us.reindex(ms).sum(), 25.0,
-            "Partly explained: Japan's figure includes corporate bonds and books trades by the counterparty's "
-            "location, so US-based dealers and custodians acting for others inflate it.")
+        ms = (g + c).dropna().index[-12:]
+        add(f"US buying of Japanese bonds, {ms[0]:%b %Y}–{ms[-1]:%b %Y}", "US data (all bonds)",
+            (g + c)[ms].sum(), "Japan's data (all bonds)", jp_us.reindex(ms).sum(), 25.0,
+            "Expected: Japan books each trade by where the other side sits, so New York dealers and custodians "
+            "acting for investors elsewhere count as 'United States'. The US data counts what US residents end up "
+            "owning. Japan's figure has run about 2x the US figure in every period over the last two years, while "
+            "both move in the same direction.")
     except Exception:
         pass
     try:  # 9. Hedge funds: futures vs filings direction
